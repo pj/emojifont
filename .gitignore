@@ -1,0 +1,49 @@
+# Binaries
+memesixel
+memesixel.exe
+
+# Go build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+go.work
+
+# Go module files (optional, if you want to commit)
+# go.sum
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Nix build artifacts
+result
+result-*
+
+.direnv
+
+# Source font and meme images (may contain copyrighted material)
+font_build/
+memes/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+dist/
+
+# Swift build artifacts
+FontTestApp/.build/
+
+# Generated test output
+snapshots/

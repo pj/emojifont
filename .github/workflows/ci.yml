@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.10", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Sync dependencies
+        run: uv sync
+
+      - name: CLI help runs
+        run: uv run emojifont --help
+
+      - name: Fetch test font (DejaVu Sans Mono, free license)
+        run: |
+          curl -sL -o /tmp/dejavu.zip \
+            https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/dejavu-fonts-ttf-2.37.zip
+          unzip -o -j /tmp/dejavu.zip "dejavu-fonts-ttf-2.37/ttf/DejaVuSansMono.ttf" -d /tmp
+
+      - name: Smoke test font injection
+        run: |
+          # Generate a test image so no copyrighted assets are needed
+          uv run python -c "
+          from PIL import Image
+          img = Image.new('RGBA', (256, 256), (255, 0, 0, 255))
+          img.save('/tmp/test_image.png')
+          "
+          uv run emojifont /tmp/DejaVuSansMono.ttf /tmp/TestFont.ttf \
+            --mappings "U+F900:/tmp/test_image.png" \
+            --font-name "TestFont"
+
+          # Verify the output font has the sbix table and mapped glyph
+          uv run python -c "
+          from fontTools.ttLib import TTFont
+          font = TTFont('/tmp/TestFont.ttf')
+          assert 'sbix' in font, 'sbix table missing'
+          cmap = font.getBestCmap()
+          assert 0xF900 in cmap, 'U+F900 not mapped'
+          glyph_name = cmap[0xF900]
+          strike = font['sbix'].strikes[160]
+          assert glyph_name in strike.glyphs, 'bitmap missing from strike'
+          print('Font validation passed:', glyph_name)
+          "
+
+      - name: Build distribution
+        run: uv build
