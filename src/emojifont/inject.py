@@ -110,13 +110,19 @@ def ensure_glyph_exists(font, glyph_name, advance_width, units_per_em):
         raise ValueError("Font has no 'glyf' table (TrueType outlines); adding new glyphs not supported for CFF fonts")
     glyph_order.append(glyph_name)
     font.setGlyphOrder(glyph_order)
-    # Apple-style: bbox from baseline (0) to top of em square (units_per_em).
-    # The SBIX bitmap fills this box; artwork is centered within the bitmap itself.
+    # Proper closed rectangular outline so renderers that don't check SBIX
+    # (e.g. iTerm2) still see a valid glyph. The SBIX bitmap replaces this
+    # outline when the renderer supports it.
     placeholder = TTGlyph()
-    placeholder.numberOfContours = 2
-    placeholder.coordinates = GlyphCoordinates([(0, 0), (advance_width, units_per_em)])
-    placeholder.flags = bytes([1, 1])
-    placeholder.endPtsOfContours = [0, 1]
+    placeholder.numberOfContours = 1
+    placeholder.coordinates = GlyphCoordinates([
+        (0, 0),
+        (advance_width, 0),
+        (advance_width, units_per_em),
+        (0, units_per_em),
+    ])
+    placeholder.flags = bytes([1, 1, 1, 1])  # all on-curve
+    placeholder.endPtsOfContours = [3]
     empty_program = ttProgram.Program()
     empty_program.fromBytecode(b'')
     placeholder.program = empty_program
