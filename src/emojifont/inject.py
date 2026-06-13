@@ -110,19 +110,21 @@ def ensure_glyph_exists(font, glyph_name, advance_width, units_per_em):
         raise ValueError("Font has no 'glyf' table (TrueType outlines); adding new glyphs not supported for CFF fonts")
     glyph_order.append(glyph_name)
     font.setGlyphOrder(glyph_order)
-    # Proper closed rectangular outline so renderers that don't check SBIX
-    # (e.g. iTerm2) still see a valid glyph. The SBIX bitmap replaces this
-    # outline when the renderer supports it.
+    # Two identical rectangles with opposite winding directions. Under
+    # TrueType's non-zero winding rule they cancel out, rendering nothing
+    # visible, but the glyph has a valid bounding box so renderers that
+    # don't support SBIX (e.g. iTerm2) still recognise it as a real glyph
+    # and allocate the correct advance width.
     placeholder = TTGlyph()
-    placeholder.numberOfContours = 1
+    placeholder.numberOfContours = 2
+    # Contour 1: clockwise
+    # Contour 2: counter-clockwise (same rectangle, reversed)
     placeholder.coordinates = GlyphCoordinates([
-        (0, 0),
-        (advance_width, 0),
-        (advance_width, units_per_em),
-        (0, units_per_em),
+        (0, 0), (advance_width, 0), (advance_width, units_per_em), (0, units_per_em),
+        (0, 0), (0, units_per_em), (advance_width, units_per_em), (advance_width, 0),
     ])
-    placeholder.flags = bytes([1, 1, 1, 1])  # all on-curve
-    placeholder.endPtsOfContours = [3]
+    placeholder.flags = bytes([1, 1, 1, 1, 1, 1, 1, 1])  # all on-curve
+    placeholder.endPtsOfContours = [3, 7]
     empty_program = ttProgram.Program()
     empty_program.fromBytecode(b'')
     placeholder.program = empty_program
@@ -198,11 +200,11 @@ def inject_sbix_memes(font_path, output_path, mappings, ppem=160, ppi=72, resize
         sbix_table.strikes = {}
         font['sbix'] = sbix_table
     
-    # Create multiple strikes for different sizes (improves compatibility)
-    # Common emoji sizes: 32, 64, 128, 160
+    # Create multiple strikes for different sizes (improves compatibility).
+    # Small sizes (20-48) cover typical terminal fonts on 1x and 2x displays;
+    # larger sizes (64-160) cover UI rendering and high-DPI displays.
     strike_sizes = [ppem]
-    # Add additional common sizes if not already there
-    for size in [32, 64, 128, 160]:
+    for size in [20, 24, 28, 32, 48, 64, 96, 128, 160]:
         if size not in strike_sizes and size != ppem:
             strike_sizes.append(size)
     
@@ -347,13 +349,22 @@ def inject_sbix_memes(font_path, output_path, mappings, ppem=160, ppi=72, resize
         import time
         current_time = int(time.time()) + 2082844800  # Mac epoch offset
         font['head'].modified = current_time
-    
+
     # Save the modified font
     print(f"Saving font: {output_path}")
     font.save(output_path)
+    font.close()
+
+    # fonttools recalculates head.flags on save, clearing bit 1.
+    # Re-open and set it: bit 1 tells renderers (e.g. iTerm2) the font
+    # contains SBIX bitmap data.
+    font2 = TTFont(output_path)
+    font2['head'].flags |= (1 << 1)
+    font2.save(output_path, reorderTables=False)
+    font2.close()
+
     import time
     print(f"Successfully created: {Path(output_path).resolve()} (at {time.strftime('%H:%M:%S')})")
-    font.close()
 
 def parse_mappings(mappings_str):
     """
