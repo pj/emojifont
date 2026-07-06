@@ -182,6 +182,15 @@ def inject_sbix_memes(font_path, output_path, mappings, ppem=160, ppi=72, resize
     else:
         cap_height = int(units_per_em * 0.7)  # Estimate
 
+    # Determine the monospace advance width from an existing glyph.
+    # SBIX glyphs should match this so they align within terminal cells.
+    mono_advance = units_per_em
+    if 'hmtx' in font:
+        for probe in ['A', 'M', 'space']:
+            if probe in font['hmtx'].metrics:
+                mono_advance = font['hmtx'].metrics[probe][0]
+                break
+
     # System emoji fills ~100% of font size, centered between ascender and
     # descender, extending below baseline. We match this by:
     # 1. Filling the ppem×ppem canvas (= em square) with artwork centered in it
@@ -229,26 +238,27 @@ def inject_sbix_memes(font_path, output_path, mappings, ppem=160, ppi=72, resize
         try:
             # Use a dedicated glyph for this code point (e.g. uniF900) so only U+F900 shows our bitmap
             glyph_name = f"uni{unicode_point:04X}"
-            ensure_glyph_exists(font, glyph_name, units_per_em, units_per_em)
+            ensure_glyph_exists(font, glyph_name, mono_advance, units_per_em)
             glyph_order = font.getGlyphOrder()
             glyph_id = glyph_order.index(glyph_name) if glyph_name in glyph_order else -1
 
             # Read the meme image
             meme_data = Path(meme_path).read_bytes()
 
-            # Resize meme and center it on a ppem×ppem transparent canvas.
-            # Artwork is centered in the canvas (no y_offset in the bitmap itself).
-            # Instead, we use SBIX originOffsetY to shift the whole bitmap down
-            # so that it's centered between ascender and descender.
+            # Resize meme and center it on a canvas matching the cell proportions.
+            # Canvas height = ppem (full em square), canvas width scaled to match
+            # the monospace advance width so the image fits within the terminal cell.
             graphic_type = None
-            img_width = ppem
+            canvas_w = int(ppem * mono_advance / units_per_em)
+            img_width = canvas_w
             img_height = ppem
 
             if resize:
                 try:
+                    content = min(emoji_height, canvas_w - margin)
                     meme_data, img_width, img_height = resize_image_to_emoji(
-                        meme_data, content_size=emoji_height,
-                        canvas_width=ppem, canvas_height=ppem,
+                        meme_data, content_size=content,
+                        canvas_width=canvas_w, canvas_height=ppem,
                         y_offset=0
                     )
                     graphic_type = 'png '
@@ -298,10 +308,10 @@ def inject_sbix_memes(font_path, output_path, mappings, ppem=160, ppi=72, resize
             # Add to main strike
             strike.glyphs[glyph_name] = glyph_bitmap
             
-            # Set advance width to 1 em (matching system emoji visual width).
-            # Terminal 2-cell allocation comes from Unicode East Asian Width, not advance.
+            # Set advance width to match the monospace cell width so the glyph
+            # aligns correctly within a single terminal cell.
             if 'hmtx' in font:
-                font['hmtx'].metrics[glyph_name] = (units_per_em, 0)
+                font['hmtx'].metrics[glyph_name] = (mono_advance, 0)
             
             # Ensure this code point maps to our glyph in all Unicode cmap subtables
             # (so the requested U+F900 etc. always show our bitmap regardless of which subtable the OS uses)
@@ -317,12 +327,14 @@ def inject_sbix_memes(font_path, output_path, mappings, ppem=160, ppi=72, resize
                     continue
 
                 try:
+                    scaled_canvas_w = int(strike_ppem * mono_advance / units_per_em)
                     scaled_emoji_height = strike_ppem - margin
+                    scaled_content = min(scaled_emoji_height, scaled_canvas_w - margin)
                     scaled_descent_shift = int(descent * strike_ppem / (2 * units_per_em))
                     scaled_data, _, _ = resize_image_to_emoji(
                         Path(meme_path).read_bytes(),
-                        content_size=scaled_emoji_height,
-                        canvas_width=strike_ppem, canvas_height=strike_ppem,
+                        content_size=scaled_content,
+                        canvas_width=scaled_canvas_w, canvas_height=strike_ppem,
                         y_offset=0
                     )
                     scaled_glyph = SbixGlyph(
