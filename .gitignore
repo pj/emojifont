@@ -47,3 +47,4 @@ FontTestApp/.build/
 
 # Generated test output
 snapshots/
+vm/output/
