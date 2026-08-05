@@ -18,11 +18,15 @@ from emojifont.fetch import (
     claim_filename,
     download,
     dump_group,
+    fetch_frankerfacez_pages,
     find_pack,
+    frankerfacez_best_url,
+    frankerfacez_emoji,
     mappings_string,
     pack_emoji,
     resolve_names,
     search_emoji,
+    sniff_content_type_ext,
     write_contact_sheet,
 )
 
@@ -251,6 +255,23 @@ class TestClaimFilename:
         claim_filename(E("a", "a"), taken)
         assert "a.png" in taken
 
+    def test_case_variants_do_not_silently_collide(self):
+        """macOS APFS and Windows are case-insensitive-but-preserving: 'Pog.png'
+        and 'pog.png' are the same file there, even though they're different
+        Python strings. A different-case duplicate must still be detected as
+        taken, or the second download silently overwrites the first on disk."""
+        taken = set()
+        first = claim_filename(E("1", "Pog"), taken)
+        second = claim_filename(E("2", "pog"), taken)
+        assert first == "Pog.png"
+        assert second != first
+        assert second.lower() != first.lower()
+
+    def test_case_variant_falls_back_to_id_like_exact_duplicates(self):
+        taken = set()
+        claim_filename(E("111", "Pog"), taken)
+        assert claim_filename(E("222", "POG"), taken) == "222.png"
+
 
 # ---------------------------------------------------------------------------
 # bulk dump
@@ -275,6 +296,21 @@ class TestDumpGroup:
         assert len(written) == 3
         assert len({d for _, d in written}) == 3
         assert len(list(tmp_path.iterdir())) == 3
+
+    def test_case_variant_names_all_survive_on_disk(self, tmp_path, fake_http):
+        """Regression test: on a case-insensitive-but-preserving filesystem
+        (the macOS/Windows default), 'Pog.png' and 'pog.png' are literally
+        the same file — writing both without case-aware collision tracking
+        silently drops one and misreports a fresh directory as having
+        pre-existing files. This must run against a real filesystem (not a
+        fake) to actually exercise that behaviour."""
+        dupes = [E("1", "Pog"), E("2", "pog"), E("3", "POG")]
+        written, skipped, failures = dump_group(dupes, tmp_path, jobs=1)
+        assert len(written) == 3
+        assert not skipped and not failures
+        on_disk = {p.name for p in tmp_path.iterdir()}
+        assert len(on_disk) == 3
+        assert len({n.lower() for n in on_disk}) == 3
 
     def test_second_run_skips_existing(self, tmp_path, index, fake_http):
         static = [e for e in index if e.is_static]
@@ -383,3 +419,198 @@ class TestSheetEntriesFromDisk:
         self._dump(tmp_path)
         entries, _ = sheet_entries_from_disk(tmp_path)
         assert {e.category for e in entries} == {"packA", "packB"}
+
+
+# ---------------------------------------------------------------------------
+# Emoji.suffix / ext override
+#
+# FFZ serves images from extensionless URLs like .../emote/128054/4, sitting
+# under a domain (frankerfacez.com) that itself contains a dot. A naive
+# "split the whole URL on its last dot" would pick up that domain dot and
+# report a nonsense extension instead of "no extension" — is_static must not
+# be fooled by that into a wrong answer.
+# ---------------------------------------------------------------------------
+
+class TestEmojiSuffix:
+    def test_extensionless_ffz_style_url_has_no_suffix(self):
+        e = Emoji(id="1", name="n", url="https://cdn.frankerfacez.com/emote/128054/4", source="frankerfacez")
+        assert e.suffix == ""
+        assert e.is_static is False
+
+    def test_domain_dot_not_mistaken_for_extension(self):
+        e = Emoji(id="1", name="n", url="https://cdn.example.com/emote/1/4", source="x")
+        assert e.suffix == ""
+
+    def test_normal_url_unaffected(self):
+        e = Emoji(id="1", name="n", url="https://cdn3.emoji.gg/emojis/1-a.png", source="emoji.gg")
+        assert e.suffix == ".png"
+
+    def test_explicit_ext_overrides_url(self):
+        e = Emoji(id="1", name="n", url="https://cdn.frankerfacez.com/emote/1/4",
+                  source="frankerfacez", ext=".gif")
+        assert e.suffix == ".gif"
+        assert e.is_static is False
+
+    def test_explicit_png_ext_makes_it_static(self):
+        e = Emoji(id="1", name="n", url="https://cdn.frankerfacez.com/emote/1/4",
+                  source="frankerfacez", ext=".png")
+        assert e.is_static is True
+
+
+# ---------------------------------------------------------------------------
+# FrankerFaceZ
+# ---------------------------------------------------------------------------
+
+def ffz_record(id, name, urls=None, modifier=False, hidden=False, public=True, count=0):
+    return {
+        "id": id, "name": name, "modifier": modifier, "hidden": hidden,
+        "public": public, "usage_count": count,
+        "urls": urls if urls is not None else {"1": f"https://cdn.frankerfacez.com/emote/{id}/1",
+                                                "2": f"https://cdn.frankerfacez.com/emote/{id}/2",
+                                                "4": f"https://cdn.frankerfacez.com/emote/{id}/4"},
+    }
+
+
+class TestFrankerfacezBestUrl:
+    def test_prefers_4x(self):
+        assert frankerfacez_best_url({"1": "a", "2": "b", "4": "c"}) == "c"
+
+    def test_falls_back_to_2x(self):
+        assert frankerfacez_best_url({"1": "a", "2": "b"}) == "b"
+
+    def test_falls_back_to_1x(self):
+        assert frankerfacez_best_url({"1": "a"}) == "a"
+
+    def test_no_urls_returns_none(self):
+        assert frankerfacez_best_url({}) is None
+
+
+class TestFrankerfacezEmoji:
+    @pytest.fixture
+    def fake_sniff(self, monkeypatch):
+        """Every sniffed emote comes back PNG unless the test overrides it."""
+        import emojifont.fetch as f
+        monkeypatch.setattr(f, "sniff_content_type_ext", lambda url, **kw: ".png")
+
+    def test_drops_modifiers(self, fake_sniff):
+        raw = [ffz_record(1, "flip", modifier=True), ffz_record(2, "OMEGALUL")]
+        got = frankerfacez_emoji(raw)
+        assert [e.name for e in got] == ["OMEGALUL"]
+
+    def test_drops_hidden(self, fake_sniff):
+        raw = [ffz_record(1, "banned", hidden=True), ffz_record(2, "OMEGALUL")]
+        got = frankerfacez_emoji(raw)
+        assert [e.name for e in got] == ["OMEGALUL"]
+
+    def test_drops_non_public(self, fake_sniff):
+        raw = [ffz_record(1, "private", public=False), ffz_record(2, "OMEGALUL")]
+        got = frankerfacez_emoji(raw)
+        assert [e.name for e in got] == ["OMEGALUL"]
+
+    def test_skips_entries_with_no_urls(self, fake_sniff):
+        raw = [ffz_record(1, "broken", urls={}), ffz_record(2, "OMEGALUL")]
+        got = frankerfacez_emoji(raw)
+        assert [e.name for e in got] == ["OMEGALUL"]
+
+    def test_preserves_order(self, fake_sniff):
+        raw = [ffz_record(1, "OMEGALUL"), ffz_record(2, "Pog"), ffz_record(3, "KEKW")]
+        got = frankerfacez_emoji(raw)
+        assert [e.name for e in got] == ["OMEGALUL", "Pog", "KEKW"]
+
+    def test_uses_best_url(self, fake_sniff):
+        raw = [ffz_record(1, "OMEGALUL", urls={"1": "low"})]
+        got = frankerfacez_emoji(raw)
+        assert got[0].url == "low"
+
+    def test_ext_from_sniff_drives_is_static(self, monkeypatch):
+        import emojifont.fetch as f
+        monkeypatch.setattr(f, "sniff_content_type_ext",
+                            lambda url, **kw: ".gif" if "999" in url else ".png")
+        raw = [ffz_record(999, "animatedOne"), ffz_record(2, "staticOne")]
+        got = {e.name: e for e in frankerfacez_emoji(raw)}
+        assert got["animatedOne"].is_static is False
+        assert got["staticOne"].is_static is True
+
+    def test_empty_input(self, fake_sniff):
+        assert frankerfacez_emoji([]) == []
+
+    def test_id_is_stringified(self, fake_sniff):
+        got = frankerfacez_emoji([ffz_record(128054, "OMEGALUL")])
+        assert got[0].id == "128054"
+
+
+class TestSniffContentTypeExt:
+    def test_maps_known_content_type(self, monkeypatch):
+        import emojifont.fetch as f
+        monkeypatch.setattr(f, "http_content_type", lambda url, **kw: "image/gif")
+        assert sniff_content_type_ext("https://x/y") == ".gif"
+
+    def test_unknown_content_type_falls_back_to_default(self, monkeypatch):
+        import emojifont.fetch as f
+        monkeypatch.setattr(f, "http_content_type", lambda url, **kw: "text/html")
+        assert sniff_content_type_ext("https://x/y") == ".png"
+
+    def test_failed_head_falls_back_rather_than_raising(self, monkeypatch):
+        """A single dead link during a 5000-item dump must not blow up the run."""
+        import emojifont.fetch as f
+        def boom(url, **kw):
+            raise OSError("connection reset")
+        monkeypatch.setattr(f, "http_content_type", boom)
+        assert sniff_content_type_ext("https://x/y") == ".png"
+
+    def test_custom_default_honoured(self, monkeypatch):
+        import emojifont.fetch as f
+        monkeypatch.setattr(f, "http_content_type", lambda url, **kw: "text/html")
+        assert sniff_content_type_ext("https://x/y", default=".webp") == ".webp"
+
+
+class TestFetchFrankerfacezPages:
+    def test_orders_by_page_then_position(self, monkeypatch):
+        """Pages are fetched in parallel; results must still come back in
+        request order regardless of which page's HTTP call finished first."""
+        import emojifont.fetch as f
+        import json as jsonlib
+
+        def fake_get(url, timeout=30):
+            page = int(url.split("page=")[1].split("&")[0])
+            # Reverse arrival order to prove sorting isn't accidental
+            import time as t
+            t.sleep(0.02 * (3 - page))
+            return jsonlib.dumps({
+                "emoticons": [{"id": page * 10 + i, "name": f"p{page}e{i}"} for i in range(2)]
+            }).encode()
+
+        monkeypatch.setattr(f, "http_get", fake_get)
+        got = fetch_frankerfacez_pages(pages=3, per_page=2, jobs=3)
+        assert [e["name"] for e in got] == ["p1e0", "p1e1", "p2e0", "p2e1", "p3e0", "p3e1"]
+
+    def test_builds_expected_url(self, monkeypatch):
+        import emojifont.fetch as f
+        seen = []
+
+        def fake_get(url, timeout=30):
+            seen.append(url)
+            return b'{"emoticons": []}'
+
+        monkeypatch.setattr(f, "http_get", fake_get)
+        fetch_frankerfacez_pages(pages=1, per_page=50, sort="count-desc")
+        assert "page=1" in seen[0] and "per_page=50" in seen[0] and "sort=count-desc" in seen[0]
+
+
+class TestFrankerfacezDumpIntegration:
+    """The point of sniffing ext up front is that FFZ Emoji objects then need
+    no special handling in the existing download/collision/sheet machinery."""
+
+    def test_ffz_emoji_flows_through_dump_group(self, tmp_path, monkeypatch):
+        import emojifont.fetch as f
+        monkeypatch.setattr(f, "http_get", lambda url, timeout=30: b"\x89PNG-data")
+        emojis = [
+            Emoji(id="1", name="OMEGALUL", url="https://cdn.frankerfacez.com/emote/1/4",
+                 source="frankerfacez", ext=".png"),
+            Emoji(id="2", name="Pog", url="https://cdn.frankerfacez.com/emote/2/4",
+                 source="frankerfacez", ext=".png"),
+        ]
+        written, skipped, failures = dump_group(emojis, tmp_path, jobs=2)
+        assert len(written) == 2
+        assert not failures
+        assert {p.name for p in tmp_path.iterdir()} == {"OMEGALUL.png", "Pog.png"}

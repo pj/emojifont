@@ -1,17 +1,19 @@
 """
-Browse and download meme images from public Discord/Slack emoji sources.
+Browse and download meme images from public Discord/Slack/Twitch emoji sources.
 
 The point is manual selection: `list` shows you what's available (optionally as
 an HTML contact sheet, since you can't judge a meme from its filename), and
 `get` downloads only the ones you name and prints the --mappings string for
-`emojifont`.
+`emojifont`. `dump`/`ffz-dump` grab everything into a directory with a contact
+sheet so you can cherry-pick on disk instead.
 
     emojifont-fetch packs --search pepe
     emojifont-fetch list --pack 983085-pepe --html /tmp/sheet.html
     emojifont-fetch get pepehappy pepeok --out memes/
+    emojifont-fetch ffz-dump --pages 100
 
-Animated GIFs are skipped by default: SBIX holds a single still per glyph, so
-an animated source would only ever show one frame.
+Animated images are skipped by default: SBIX holds a single still per glyph,
+so an animated source would only ever show one frame.
 """
 
 import argparse
@@ -32,8 +34,19 @@ EMOJI_GG_INDEX = "https://emoji.gg/api/"
 EMOJI_GG_PACKS = "https://emoji.gg/api/packs"
 EMOJI_GG_CDN = "https://cdn3.emoji.gg/emojis"
 SLACKMOJIS_INDEX = "https://slackmojis.com/emojis.json"
+FRANKERFACEZ_API = "https://api.frankerfacez.com/v1/emoticons"
 
-SOURCES = ("emoji.gg", "slackmojis")
+SOURCES = ("emoji.gg", "slackmojis", "frankerfacez")
+
+# FrankerFaceZ serves images from extensionless URLs (.../emote/<id>/4), so the
+# real format is only known from the response's Content-Type after a request.
+CONTENT_TYPE_EXT = {
+    "image/png": ".png",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/jpeg": ".jpg",
+    "image/avif": ".avif",
+}
 
 # CJK Compatibility Ideographs. Terminals treat these as East Asian Wide, so
 # they get two cells — the room a meme needs to render at full emoji size.
@@ -52,10 +65,21 @@ class Emoji:
     url: str
     source: str
     category: str = ""
+    # Explicit format override for sources whose URLs carry no extension
+    # (e.g. FrankerFaceZ's .../emote/<id>/4). Includes the leading dot.
+    ext: str = None
 
     @property
     def suffix(self):
-        return "." + self.url.split("?")[0].rsplit(".", 1)[-1].lower()
+        if self.ext:
+            return self.ext
+        # Only the last path segment can hold a real extension — splitting the
+        # whole URL would catch the dot in a domain like frankerfacez.com and
+        # produce a nonsense "extension".
+        last_segment = self.url.split("?")[0].rstrip("/").rsplit("/", 1)[-1]
+        if "." not in last_segment:
+            return ""
+        return "." + last_segment.rsplit(".", 1)[-1].lower()
 
     @property
     def is_static(self):
@@ -85,6 +109,17 @@ def http_get(url, timeout=30):
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read()
+
+
+def http_content_type(url, timeout=15):
+    """HEAD a URL and return its Content-Type, or "" if unavailable.
+
+    Used for FrankerFaceZ, whose image URLs carry no file extension — the
+    format has to be discovered from the response rather than the URL.
+    """
+    req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.headers.get("Content-Type", "").split(";")[0].strip().lower()
 
 
 def cached_json(url, cache_name, refresh=False):
@@ -138,7 +173,101 @@ def fetch_index(source="emoji.gg", refresh=False):
             for e in raw
             if e.get("image_url")
         ]
+    if source == "frankerfacez":
+        # Unlike the other two sources this isn't a flat index — it's ranked
+        # and paginated. `list`/`search` just need enough to browse, so this
+        # covers the top few pages by popularity; `ffz-dump` walks as many
+        # pages as asked for.
+        return frankerfacez_emoji(fetch_frankerfacez_pages(pages=4, per_page=50))
     raise ValueError(f"Unknown source: {source} (expected one of {', '.join(SOURCES)})")
+
+
+def sniff_content_type_ext(url, timeout=15, default=".png"):
+    """Extension implied by a URL's Content-Type, falling back to `default`.
+
+    FFZ overwhelmingly serves PNG (including animated ones as APNG, same
+    content-type), so defaulting to .png on a failed/unknown HEAD is the safe
+    choice rather than dropping the image.
+    """
+    try:
+        ct = http_content_type(url, timeout=timeout)
+    except Exception:  # noqa: BLE001 - a failed HEAD shouldn't drop the image
+        return default
+    return CONTENT_TYPE_EXT.get(ct, default)
+
+
+def frankerfacez_best_url(urls):
+    """Highest-resolution image FFZ has for an emote: prefer 4x, then 2x, then 1x.
+
+    Not every emote has all sizes — smaller/older ones often lack 4x and 2x.
+    """
+    for size in ("4", "2", "1"):
+        if urls.get(size):
+            return urls[size]
+    return None
+
+
+def fetch_frankerfacez_pages(pages, per_page=50, sort="count-desc", jobs=8, timeout=20):
+    """Fetch raw FrankerFaceZ emoticon records across `pages` API pages.
+
+    Pages are fetched in parallel (they're independent, offset-only requests)
+    but the results are handed back sorted by (page, position) so callers see
+    the requested ranking order regardless of which page finished first.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    def fetch_one(page):
+        url = f"{FRANKERFACEZ_API}?page={page}&per_page={per_page}&sort={sort}"
+        data = json.loads(http_get(url, timeout=timeout).decode("utf-8"))
+        return page, data.get("emoticons", [])
+
+    results = {}
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
+        for page, emoticons in pool.map(fetch_one, range(1, pages + 1)):
+            results[page] = emoticons
+
+    out = []
+    for page in range(1, pages + 1):
+        out.extend(results.get(page, []))
+    return out
+
+
+def frankerfacez_emoji(raw_records, sniff_ext=True, jobs=8):
+    """Convert raw FrankerFaceZ API records to Emoji, in the given order.
+
+    Modifier emotes (tiny overlay icons like "flip") and hidden/removed ones
+    are dropped — they aren't the kind of image anyone means by "meme", and
+    mixing them in would bury the real emotes in the contact sheet.
+
+    FFZ's URLs carry no file extension, so `is_static`/`suffix` are useless
+    without knowing the real format. When sniff_ext is set (the default), a
+    HEAD request per emote fills in Emoji.ext from Content-Type — the same
+    animated-GIF filtering used for the other sources then works here too.
+    Skip it (sniff_ext=False) for cheap, format-agnostic listing.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    candidates = []
+    for e in raw_records:
+        if e.get("modifier") or e.get("hidden") or e.get("public") is False:
+            continue
+        url = frankerfacez_best_url(e.get("urls") or {})
+        if not url:
+            continue
+        candidates.append((str(e["id"]), str(e["name"]), url, str(e.get("usage_count", ""))))
+
+    if not candidates:
+        return []
+
+    exts = [None] * len(candidates)
+    if sniff_ext:
+        with ThreadPoolExecutor(max_workers=jobs) as pool:
+            exts = list(pool.map(lambda c: sniff_content_type_ext(c[2]), candidates))
+
+    return [
+        Emoji(id=id_, name=name, url=url, source="frankerfacez", category=cat, ext=ext)
+        for (id_, name, url, cat), ext in zip(candidates, exts)
+    ]
 
 
 def fetch_packs(refresh=False):
@@ -267,20 +396,27 @@ def claim_filename(emoji, taken):
     without it, entries sharing a name (there are three 'facepalm's) would
     collapse onto one file and quietly disappear from the dump.
 
+    Collisions are checked case-insensitively even though the returned name
+    keeps its original case: the usual target filesystems (macOS APFS,
+    Windows) are case-insensitive-but-preserving, so "Pog.png" and "pog.png"
+    are the *same file* there even though they're different Python strings —
+    treating them as distinct would silently overwrite one with the other
+    without either name ever hitting the "already taken" branch below.
+
     Only in-run claims are consulted, never the filesystem, so re-running the
     same selection overwrites in place instead of accumulating copies.
     """
     if taken is None:
         return f"{emoji.name}{emoji.suffix}"
     for candidate in (f"{emoji.name}{emoji.suffix}", f"{emoji.id}{emoji.suffix}"):
-        if candidate not in taken:
-            taken.add(candidate)
+        if candidate.lower() not in taken:
+            taken.add(candidate.lower())
             return candidate
     n = 2
-    while f"{emoji.name}-{n}{emoji.suffix}" in taken:
+    while f"{emoji.name}-{n}{emoji.suffix}".lower() in taken:
         n += 1
     name = f"{emoji.name}-{n}{emoji.suffix}"
-    taken.add(name)
+    taken.add(name.lower())
     return name
 
 
@@ -508,6 +644,57 @@ def cmd_dump(args):
     return 0
 
 
+def cmd_ffz_dump(args):
+    """Page through FrankerFaceZ by popularity and bulk-download the results."""
+    print(f"Fetching {args.pages} page(s) of {args.per_page} (~{args.pages * args.per_page} "
+          f"emotes, sort={args.sort})...")
+    raw = fetch_frankerfacez_pages(args.pages, per_page=args.per_page, sort=args.sort, jobs=args.jobs)
+
+    print("Checking image formats (HEAD per emote, this is the slow part)...")
+    emojis = frankerfacez_emoji(raw, sniff_ext=True, jobs=args.jobs)
+
+    skipped_animated = 0
+    if not args.include_animated:
+        before = len(emojis)
+        emojis = [e for e in emojis if e.is_static]
+        skipped_animated = before - len(emojis)
+
+    if not emojis:
+        print("Nothing to download.")
+        return 0
+
+    if args.max_images and len(emojis) > args.max_images:
+        raise SystemExit(
+            f"{len(emojis)} images exceeds --max-images {args.max_images}. "
+            f"Lower --pages/--per-page, or raise the cap."
+        )
+
+    out_root = Path(args.out)
+    print(f"Downloading {len(emojis)} image(s) -> {out_root}\n")
+    written, skipped, failures = dump_group(
+        emojis, out_root, jobs=args.jobs, skip_existing=not args.overwrite
+    )
+
+    sheet = out_root / "index.html"
+    entries, srcs = sheet_entries_from_disk(out_root)
+    write_contact_sheet(
+        entries, sheet, f"emojifont — FrankerFaceZ, top {args.pages} page(s)", src_map=srcs
+    )
+
+    note = f", {skipped_animated} animated skipped" if skipped_animated else ""
+    print(f"\n{len(written)} downloaded, {len(skipped)} already present, "
+          f"{len(failures)} failed{note}; {len(entries)} image(s) in the dump")
+    if failures:
+        print("\nfailures:")
+        for e, exc in failures[:15]:
+            print(f"  {e.id} ({e.name}): {exc}")
+        if len(failures) > 15:
+            print(f"  ... {len(failures) - 15} more")
+    print(f"\nBrowse: {sheet}")
+    print("Then copy the ones you want into your memes directory.")
+    return 0
+
+
 def cmd_get(args):
     emojis, _ = _load(args)
     chosen = resolve_names(emojis, args.names)
@@ -547,6 +734,8 @@ def main(argv=None):
   emojifont-fetch list --pack 983085-pepe --html /tmp/sheet.html
   emojifont-fetch list --search shark --source slackmojis
   emojifont-fetch get pepehappy pepeok --out memes/
+  emojifont-fetch dump --out font_build/meme-dump
+  emojifont-fetch ffz-dump --pages 100 --out font_build/ffz-dump
 
 Images are user-submitted with mostly unmarked licensing — fine for personal
 use, check before redistributing.""",
@@ -588,6 +777,21 @@ use, check before redistributing.""",
     p_dump.add_argument("--max-images", type=int, default=6000,
                         help="refuse to start above this many images (default 6000)")
     p_dump.set_defaults(func=cmd_dump)
+
+    p_ffz = sub.add_parser("ffz-dump", help="bulk-download FrankerFaceZ emotes by popularity")
+    p_ffz.add_argument("--pages", type=int, default=100, help="API pages to walk (default 100)")
+    p_ffz.add_argument("--per-page", type=int, default=50, help="emotes per page (default 50)")
+    p_ffz.add_argument("--sort", default="count-desc",
+                       help="FFZ sort order (default count-desc, i.e. most-used first)")
+    p_ffz.add_argument("--out", default="font_build/ffz-dump", help="output directory")
+    p_ffz.add_argument("--jobs", type=int, default=8, help="parallel requests (default 8)")
+    p_ffz.add_argument("--overwrite", action="store_true",
+                       help="re-download files that are already present")
+    p_ffz.add_argument("--include-animated", action="store_true",
+                       help="include animated emotes (SBIX renders one still frame only)")
+    p_ffz.add_argument("--max-images", type=int, default=6000,
+                       help="refuse to start above this many images (default 6000)")
+    p_ffz.set_defaults(func=cmd_ffz_dump)
 
     p_get = sub.add_parser("get", help="download the images you name")
     p_get.add_argument("names", nargs="+", help="ids or names from `list`")
