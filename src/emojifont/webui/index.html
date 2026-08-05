@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>emojifont — meme picker</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    font: 14px/1.4 -apple-system, system-ui, sans-serif;
+    margin: 0; background: #16161a; color: #eee;
+    display: grid; grid-template-columns: 1fr 340px; grid-template-rows: auto 1fr;
+    height: 100vh;
+  }
+  header {
+    grid-column: 1 / -1;
+    display: flex; align-items: center; gap: .75rem;
+    padding: .7rem 1rem; background: #1c1c22; border-bottom: 1px solid #2a2a33;
+  }
+  header h1 { font-size: 1rem; font-weight: 600; margin: 0; white-space: nowrap; }
+  header input[type=search] {
+    flex: 1; min-width: 120px; padding: .4rem .6rem; border-radius: 6px;
+    border: 1px solid #33333e; background: #101014; color: #eee;
+  }
+  select, button, input[type=text], input[type=number] {
+    font: inherit; border-radius: 6px; border: 1px solid #33333e;
+    background: #101014; color: #eee; padding: .4rem .6rem;
+  }
+  button { cursor: pointer; background: #2a2a33; }
+  button:hover { background: #34343f; }
+  button.primary { background: #3a6ff7; border-color: #3a6ff7; color: #fff; }
+  button.primary:hover { background: #4c7cff; }
+  button:disabled { opacity: .45; cursor: default; }
+  label.check { display: flex; align-items: center; gap: .35rem; white-space: nowrap; color: #b8b8c0; }
+  #status { color: #8a8a94; white-space: nowrap; font-size: 12px; }
+
+  main {
+    overflow-y: auto; padding: 1rem;
+  }
+  #grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: .8rem;
+  }
+  figure {
+    margin: 0; background: #202028; border: 1px solid #2a2a33; border-radius: 8px;
+    padding: .5rem; position: relative; text-align: center;
+  }
+  figure.is-selected { border-color: #3a6ff7; box-shadow: 0 0 0 1px #3a6ff7 inset; }
+  figure img {
+    width: 100%; height: 72px; object-fit: contain; background: repeating-conic-gradient(#26262e 0% 25%, #1e1e24 0% 50%) 0 0/12px 12px;
+    border-radius: 4px;
+  }
+  figure figcaption {
+    font-size: 11px; margin-top: .35rem; word-break: break-word; color: #cfcfd6;
+    max-height: 2.6em; overflow: hidden;
+  }
+  .card-actions { display: flex; justify-content: space-between; margin-top: .35rem; gap: .25rem; }
+  .icon-btn {
+    background: none; border: none; padding: .1rem .3rem; font-size: 15px; line-height: 1; color: #8a8a94;
+  }
+  .icon-btn:hover { background: #2e2e38; }
+  .icon-btn.starred { color: #f5c542; }
+  .icon-btn.selected { color: #3a6ff7; }
+  .badge {
+    position: absolute; top: .35rem; right: .35rem; background: #b34; color: #fff;
+    font-size: 9px; padding: 1px 4px; border-radius: 3px;
+  }
+  #loadMore { display: block; margin: 1rem auto; }
+
+  aside {
+    border-left: 1px solid #2a2a33; background: #1a1a20; overflow-y: auto;
+    padding: 1rem; display: flex; flex-direction: column; gap: 1rem;
+  }
+  aside h2 { font-size: .85rem; margin: 0 0 .4rem; color: #cfcfd6; }
+  #selectedList { display: flex; flex-direction: column; gap: .3rem; }
+  .sel-row {
+    display: flex; align-items: center; gap: .4rem; background: #202028; border-radius: 6px;
+    padding: .3rem .4rem;
+  }
+  .sel-row img { width: 26px; height: 26px; object-fit: contain; border-radius: 3px; flex: none; }
+  .sel-row .seq { color: #6a6a74; font-size: 11px; width: 1.6em; text-align: right; flex: none; }
+  .sel-row .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+  .sel-row .cp { color: #6a6a74; font-size: 10px; flex: none; }
+  .sel-row button { padding: .1rem .35rem; font-size: 11px; }
+  #genForm { display: flex; flex-direction: column; gap: .5rem; }
+  #genForm label { font-size: 12px; color: #b8b8c0; display: flex; flex-direction: column; gap: .2rem; }
+  #genForm input { width: 100%; }
+  #genResult { font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+  #genResult.error { color: #f77; }
+  #genResult.ok { color: #7d7; }
+  .empty-hint { color: #6a6a74; font-size: 12px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>emojifont</h1>
+  <input id="search" type="search" placeholder="Search names…">
+  <select id="sourceFilter"><option value="">All sources</option></select>
+  <label class="check"><input type="checkbox" id="starredOnly"> ★ starred only</label>
+  <label class="check"><input type="checkbox" id="selectedOnly"> ✓ selected only</label>
+  <button id="rescanBtn" title="Re-index the scan directories for newly downloaded memes">Rescan</button>
+  <span id="status"></span>
+</header>
+
+<main>
+  <div id="grid"></div>
+  <button id="loadMore" hidden>Load more</button>
+</main>
+
+<aside>
+  <section>
+    <h2>Selected (<span id="selCount">0</span>)</h2>
+    <div id="selectedList"></div>
+    <p class="empty-hint" id="selectedEmptyHint">Nothing selected yet. Click ✓ on a meme to add it.</p>
+    <button id="clearSelBtn" style="margin-top:.5rem;">Clear selection</button>
+  </section>
+
+  <section>
+    <h2>Generate font</h2>
+    <form id="genForm">
+      <label>Base font
+        <input type="text" id="baseFont" placeholder="/path/to/BaseFont.ttf">
+      </label>
+      <label>Output path
+        <input type="text" id="outputPath" placeholder="/path/to/MemeFont.ttf">
+      </label>
+      <label>Font name
+        <input type="text" id="fontName" value="MemeFont">
+      </label>
+      <label>Strike size (ppem)
+        <input type="number" id="ppem" value="160" min="20" max="512">
+      </label>
+      <label>Start code point
+        <input type="text" id="startCp" value="F900">
+      </label>
+      <button type="submit" class="primary" id="genBtn">Generate</button>
+    </form>
+    <div id="genResult"></div>
+  </section>
+</aside>
+
+<script>
+const state = { search: '', source: '', starredOnly: false, selectedOnly: false, offset: 0, limit: 300, total: 0 };
+const memeById = new Map();
+
+const $ = (sel) => document.querySelector(sel);
+const grid = $('#grid');
+const statusEl = $('#status');
+
+function debounce(fn, ms) {
+  let t;
+  return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+}
+
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+
+function queryString() {
+  const p = new URLSearchParams();
+  if (state.search) p.set('search', state.search);
+  if (state.source) p.set('source', state.source);
+  if (state.starredOnly) p.set('starred', '1');
+  if (state.selectedOnly) p.set('selected', '1');
+  p.set('limit', state.limit);
+  p.set('offset', state.offset);
+  return p.toString();
+}
+
+function cardHtml(m) {
+  const selected = m.selected_seq !== null;
+  const animated = m.ext === '.gif';
+  return `
+    <figure data-id="${m.id}" class="${selected ? 'is-selected' : ''}">
+      ${animated ? '<span class="badge">GIF</span>' : ''}
+      <img loading="lazy" src="/images/${m.id}" alt="">
+      <figcaption title="${escapeHtml(m.name)}">${escapeHtml(m.name)}</figcaption>
+      <div class="card-actions">
+        <button class="icon-btn star-btn ${m.starred ? 'starred' : ''}" title="Star">${m.starred ? '★' : '☆'}</button>
+        <button class="icon-btn select-btn ${selected ? 'selected' : ''}"
+                title="${animated ? 'Animated images cannot be used' : 'Select for font'}"
+                ${animated ? 'disabled' : ''}>${selected ? '✓' : '+'}</button>
+      </div>
+    </figure>`;
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+async function loadMemes(reset) {
+  if (reset) { state.offset = 0; grid.innerHTML = ''; }
+  const data = await api(`/api/memes?${queryString()}`);
+  state.total = data.total;
+  for (const m of data.items) {
+    memeById.set(m.id, m);
+    grid.insertAdjacentHTML('beforeend', cardHtml(m));
+  }
+  state.offset = data.offset + data.items.length;
+  $('#loadMore').hidden = state.offset >= state.total;
+  statusEl.textContent = `${state.total} meme${state.total === 1 ? '' : 's'}`;
+}
+
+async function loadSources() {
+  const data = await api('/api/sources');
+  const sel = $('#sourceFilter');
+  const current = sel.value;
+  sel.innerHTML = '<option value="">All sources</option>' +
+    data.sources.map(s => `<option value="${escapeHtml(s.source)}">${escapeHtml(s.source)} (${s.n})</option>`).join('');
+  sel.value = current;
+}
+
+function selRowHtml(m, i, count) {
+  return `
+    <div class="sel-row" data-id="${m.id}">
+      <span class="seq">${i + 1}</span>
+      <img src="/images/${m.id}" alt="">
+      <span class="name" title="${escapeHtml(m.name)}">${escapeHtml(m.name)}</span>
+      <button class="up-btn" ${i === 0 ? 'disabled' : ''} title="Move up">↑</button>
+      <button class="down-btn" ${i === count - 1 ? 'disabled' : ''} title="Move down">↓</button>
+      <button class="remove-btn" title="Remove">×</button>
+    </div>`;
+}
+
+async function loadSelection() {
+  const data = await api('/api/selection');
+  $('#selCount').textContent = data.items.length;
+  $('#selectedEmptyHint').hidden = data.items.length > 0;
+  $('#selectedList').innerHTML = data.items.map((m, i) => selRowHtml(m, i, data.items.length)).join('');
+}
+
+async function refreshAll(resetGrid) {
+  await Promise.all([loadMemes(resetGrid), loadSelection(), loadSources()]);
+}
+
+// -- event wiring ------------------------------------------------------
+
+$('#search').addEventListener('input', debounce((e) => {
+  state.search = e.target.value.trim();
+  loadMemes(true);
+}, 250));
+
+$('#sourceFilter').addEventListener('change', (e) => { state.source = e.target.value; loadMemes(true); });
+$('#starredOnly').addEventListener('change', (e) => { state.starredOnly = e.target.checked; loadMemes(true); });
+$('#selectedOnly').addEventListener('change', (e) => { state.selectedOnly = e.target.checked; loadMemes(true); });
+$('#loadMore').addEventListener('click', () => loadMemes(false));
+
+$('#rescanBtn').addEventListener('click', async () => {
+  const btn = $('#rescanBtn');
+  btn.disabled = true; btn.textContent = 'Scanning…';
+  try {
+    const data = await api('/api/rescan', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+    statusEl.textContent = `rescan: +${data.added} new, ${data.missing} missing`;
+    await refreshAll(true);
+  } catch (e) {
+    statusEl.textContent = `rescan failed: ${e.message}`;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Rescan';
+  }
+});
+
+grid.addEventListener('click', async (e) => {
+  const fig = e.target.closest('figure');
+  if (!fig) return;
+  const id = Number(fig.dataset.id);
+
+  if (e.target.classList.contains('star-btn')) {
+    const m = memeById.get(id);
+    const next = !m.starred;
+    e.target.classList.toggle('starred', next);
+    e.target.textContent = next ? '★' : '☆';
+    try {
+      await api(`/api/memes/${id}/star`, {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ starred: next }),
+      });
+      m.starred = next;
+      if (state.starredOnly && !next) loadMemes(true);
+    } catch (err) {
+      e.target.classList.toggle('starred', !next);
+      e.target.textContent = !next ? '★' : '☆';
+      statusEl.textContent = `error: ${err.message}`;
+    }
+    return;
+  }
+
+  if (e.target.classList.contains('select-btn')) {
+    if (e.target.disabled) return;
+    const m = memeById.get(id);
+    const next = m.selected_seq === null;
+    try {
+      await api(`/api/memes/${id}/select`, {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ selected: next }),
+      });
+      fig.classList.toggle('is-selected', next);
+      e.target.classList.toggle('selected', next);
+      e.target.textContent = next ? '✓' : '+';
+      m.selected_seq = next ? 1 : null; // placeholder; real seq refreshed via loadSelection
+      if (state.selectedOnly && !next) loadMemes(true);
+      await loadSelection();
+    } catch (err) {
+      statusEl.textContent = `error: ${err.message}`;
+    }
+    return;
+  }
+});
+
+$('#selectedList').addEventListener('click', async (e) => {
+  const row = e.target.closest('.sel-row');
+  if (!row) return;
+  const id = Number(row.dataset.id);
+
+  if (e.target.classList.contains('remove-btn')) {
+    await api(`/api/memes/${id}/select`, {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ selected: false }),
+    });
+    const m = memeById.get(id);
+    if (m) m.selected_seq = null;
+    const fig = grid.querySelector(`figure[data-id="${id}"]`);
+    if (fig) {
+      fig.classList.remove('is-selected');
+      const btn = fig.querySelector('.select-btn');
+      btn.classList.remove('selected'); btn.textContent = '+';
+    }
+    await loadSelection();
+    if (state.selectedOnly) loadMemes(true);
+    return;
+  }
+
+  if (e.target.classList.contains('up-btn') || e.target.classList.contains('down-btn')) {
+    const direction = e.target.classList.contains('up-btn') ? 'up' : 'down';
+    await api('/api/selection/reorder', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ id, direction }),
+    });
+    await loadSelection();
+  }
+});
+
+$('#clearSelBtn').addEventListener('click', async () => {
+  if (!confirm('Clear the whole selection?')) return;
+  await api('/api/selection/clear', { method: 'POST' });
+  document.querySelectorAll('figure.is-selected').forEach(f => {
+    f.classList.remove('is-selected');
+    const btn = f.querySelector('.select-btn');
+    btn.classList.remove('selected'); btn.textContent = '+';
+  });
+  memeById.forEach(m => { m.selected_seq = null; });
+  await loadSelection();
+  if (state.selectedOnly) loadMemes(true);
+});
+
+$('#genForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = $('#genBtn');
+  const resultEl = $('#genResult');
+  resultEl.className = ''; resultEl.textContent = '';
+  btn.disabled = true; btn.textContent = 'Generating…';
+  try {
+    const data = await api('/api/generate', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        base_font: $('#baseFont').value.trim(),
+        output_path: $('#outputPath').value.trim(),
+        font_name: $('#fontName').value.trim(),
+        ppem: Number($('#ppem').value),
+        start_codepoint: $('#startCp').value.trim(),
+      }),
+    });
+    resultEl.className = 'ok';
+    const lines = data.mapping.map(m => `  ${m.codepoint}  ${m.name}`).join('\n');
+    resultEl.textContent = `Wrote ${data.count} meme(s) to:\n${data.output_path}\n\n${lines}`;
+  } catch (err) {
+    resultEl.className = 'error';
+    resultEl.textContent = err.message;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Generate';
+  }
+});
+
+// -- init ------------------------------------------------------------
+
+(async () => {
+  const cfg = await api('/api/config');
+  $('#baseFont').value = cfg.default_base_font;
+  $('#outputPath').value = cfg.default_output;
+  await refreshAll(true);
+})();
+</script>
+</body>
+</html>
