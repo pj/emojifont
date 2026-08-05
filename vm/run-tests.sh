@@ -117,6 +117,36 @@ rsync_from_vm() {
         "${SSH_USER}@${ip}:${src}" "$dst"
 }
 
+# Build the test font in the VM from the freshly synced source.
+# Always rebuilds: a cached /tmp/TestMemeFont.ttf from an earlier run would
+# silently mask source changes and make the tests report on a stale font.
+build_test_font() {
+    local ip=$1
+    ssh_run "$ip" "
+        export PATH=\"\$HOME/.local/bin:\$PATH\"
+        cd ~/Projects/emojifont
+
+        if [ -f font_build/MonacoNerdFontMono-Regular.ttf ] && [ -d font_build/memes ]; then
+            # Build mappings from available meme images, starting at U+F900
+            MAPPINGS=''
+            CP=63744  # 0xF900
+            for img in font_build/memes/*; do
+                HEX=\$(printf '%04X' \$CP)
+                if [ -n \"\$MAPPINGS\" ]; then MAPPINGS=\"\$MAPPINGS,\"; fi
+                MAPPINGS=\"\${MAPPINGS}U+\${HEX}:\${img}\"
+                CP=\$((CP + 1))
+            done
+
+            rm -f /tmp/TestMemeFont.ttf
+            uv run emojifont font_build/MonacoNerdFontMono-Regular.ttf /tmp/TestMemeFont.ttf \\
+                --mappings \"\$MAPPINGS\" --font-name 'TestMemeFont' 2>&1
+        else
+            echo 'SKIP: font_build/MonacoNerdFontMono-Regular.ttf or font_build/memes/ not found'
+            exit 2
+        fi
+    "
+}
+
 usage() {
     echo "Usage: $0 [options]"
     echo ""
@@ -136,6 +166,7 @@ run_tests() {
     local run_render=true
     local run_screenshot=false
     local codepoints="F900,F901"
+    local font_built=false
 
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -232,30 +263,9 @@ run_tests() {
     # ------------------------------------------------------------------ #
     if [ "$run_render" = true ]; then
         log_info "Building test font..."
-        ssh_run "$ip" "
-            export PATH=\"\$HOME/.local/bin:\$PATH\"
-            cd ~/Projects/emojifont
-
-            # Build the meme font using the real base font and meme images
-            if [ -f font_build/MonacoNerdFontMono-Regular.ttf ] && [ -d font_build/memes ]; then
-                # Build mappings from available meme images
-                MAPPINGS=''
-                CP=63744  # 0xF900
-                for img in font_build/memes/*; do
-                    HEX=\$(printf '%04X' \$CP)
-                    if [ -n \"\$MAPPINGS\" ]; then MAPPINGS=\"\$MAPPINGS,\"; fi
-                    MAPPINGS=\"\${MAPPINGS}U+\${HEX}:\${img}\"
-                    CP=\$((CP + 1))
-                done
-
-                uv run emojifont font_build/MonacoNerdFontMono-Regular.ttf /tmp/TestMemeFont.ttf \\
-                    --mappings \"\$MAPPINGS\" --font-name 'TestMemeFont' 2>&1
-            else
-                echo 'SKIP: font_build/MonacoNerdFontMono-Regular.ttf or font_build/memes/ not found'
-                exit 2
-            fi
-        "
+        build_test_font "$ip"
         local build_exit=$?
+        font_built=true
 
         if [ $build_exit -eq 2 ]; then
             log_warn "Skipping render tests — base font or memes not synced"
@@ -286,30 +296,10 @@ run_tests() {
     # ------------------------------------------------------------------ #
     # MemeTerminal screenshot test                                         #
     # ------------------------------------------------------------------ #
-    if [ "$run_screenshot" = true ]; then
-        # Ensure we have a built font (build if not already done above)
-        ssh_run "$ip" "test -f /tmp/TestMemeFont.ttf" 2>/dev/null || {
-            log_info "Building test font for screenshot..."
-            ssh_run "$ip" "
-                export PATH=\"\$HOME/.local/bin:\$PATH\"
-                cd ~/Projects/emojifont
-                if [ -f font_build/MonacoNerdFontMono-Regular.ttf ] && [ -d font_build/memes ]; then
-                    MAPPINGS=''
-                    CP=63744
-                    for img in font_build/memes/*; do
-                        HEX=\$(printf '%04X' \$CP)
-                        if [ -n \"\$MAPPINGS\" ]; then MAPPINGS=\"\$MAPPINGS,\"; fi
-                        MAPPINGS=\"\${MAPPINGS}U+\${HEX}:\${img}\"
-                        CP=\$((CP + 1))
-                    done
-                    uv run emojifont font_build/MonacoNerdFontMono-Regular.ttf /tmp/TestMemeFont.ttf \\
-                        --mappings \"\$MAPPINGS\" --font-name 'TestMemeFont' 2>&1
-                else
-                    echo 'SKIP: base font or memes not found'
-                    exit 2
-                fi
-            " || { log_warn "Font build failed — skipping screenshot"; run_screenshot=false; }
-        }
+    if [ "$run_screenshot" = true ] && [ "$font_built" = false ]; then
+        log_info "Building test font for screenshot..."
+        build_test_font "$ip" \
+            || { log_warn "Font build failed — skipping screenshot"; run_screenshot=false; }
     fi
 
     if [ "$run_screenshot" = true ]; then

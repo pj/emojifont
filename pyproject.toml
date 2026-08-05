@@ -24,6 +24,7 @@ dependencies = [
 
 [project.scripts]
 emojifont = "emojifont.inject:main"
+emojifont-fetch = "emojifont.fetch:main"
 
 [project.urls]
 Repository = "https://github.com/pj/emojifont"

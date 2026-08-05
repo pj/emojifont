@@ -5,6 +5,7 @@ This script uses fonttools to create macOS-compatible fonts.
 
 import sys
 import io
+import unicodedata
 from pathlib import Path
 from fontTools.ttLib import TTFont
 from fontTools.ttLib.tables._s_b_i_x import table__s_b_i_x
@@ -58,14 +59,21 @@ def rename_font(font, new_family_name):
     print(f"  Full name: {full_name}")
     print(f"  PostScript name: {postscript_name}")
 
-def resize_image_to_emoji(image_data, content_size, canvas_width, canvas_height, y_offset=0):
+def resize_image_to_emoji(image_data, content_width, content_height, canvas_width, canvas_height, y_offset=0):
     """
     Resize a meme image and place it on a transparent canvas.
 
+    The artwork is scaled to fit inside content_width x content_height while
+    preserving its aspect ratio. Fitting to the actual content box rather than
+    to a square inscribed in it matters for non-square memes: a 4:3 image fitted
+    to a square would only reach 3/4 of the em height and read as noticeably
+    smaller than the system emoji beside it.
+
     Args:
         image_data: Raw image bytes
-        content_size: Max size for the meme artwork in pixels
-        canvas_width: Canvas width in pixels (e.g. 2*ppem for 2-cell glyphs)
+        content_width: Max width for the meme artwork in pixels
+        content_height: Max height for the meme artwork in pixels
+        canvas_width: Canvas width in pixels (e.g. 2 cells for wide glyphs)
         canvas_height: Canvas height in pixels (= ppem, fills the em square)
         y_offset: Pixels to shift the image down within the canvas (positive = down).
 
@@ -78,10 +86,9 @@ def resize_image_to_emoji(image_data, content_size, canvas_width, canvas_height,
         img = img.convert('RGBA')
 
     width, height = img.size
-    max_dim = max(width, height)
-    scale = content_size / max_dim
-    new_width = int(width * scale)
-    new_height = int(height * scale)
+    scale = min(content_width / width, content_height / height)
+    new_width = max(1, round(width * scale))
+    new_height = max(1, round(height * scale))
 
     img_resized = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
 
@@ -95,6 +102,20 @@ def resize_image_to_emoji(image_data, content_size, canvas_width, canvas_height,
     output = io.BytesIO()
     canvas.save(output, format='PNG')
     return output.getvalue(), canvas_width, canvas_height
+
+
+def cells_for_codepoint(unicode_point):
+    """
+    Number of terminal cells a code point occupies, per Unicode East Asian Width.
+
+    Wide (W) and Fullwidth (F) code points get two cells — this includes the CJK
+    Compatibility Ideographs block (U+F900-U+FAFF) and standard emoji. Everything
+    else, including the Private Use Area (U+E000-U+F8FF, Ambiguous), gets one.
+
+    Matching this matters for sizing: a two-cell glyph can fill the full em square
+    the way system emoji do, while a one-cell glyph is limited to the cell width.
+    """
+    return 2 if unicodedata.east_asian_width(chr(unicode_point)) in ('W', 'F') else 1
 
 
 def ensure_glyph_exists(font, glyph_name, advance_width, units_per_em):
@@ -197,9 +218,14 @@ def inject_sbix_memes(font_path, output_path, mappings, ppem=160, ppi=72, resize
     # 2. Using originOffsetY to shift the bitmap down so its center aligns with
     #    the ascender/descender midpoint rather than the em-square midpoint
     scale = ppem / units_per_em
-    margin = 4
-    emoji_height = ppem - margin  # Fill nearly the full em square
-    
+
+    def strike_margin(strike_ppem):
+        # Inset the artwork slightly so antialiasing at the edges doesn't bleed
+        # into the neighbouring cell. Proportional rather than fixed: a flat 4px
+        # is negligible at 160 ppem but eats 20% of a 20 ppem strike, which would
+        # make memes shrink relative to emoji at small terminal sizes.
+        return max(1, round(strike_ppem * 0.025))
+
     # Create or get SBIX table
     if 'sbix' not in font:
         print("Creating new SBIX table")
@@ -238,7 +264,14 @@ def inject_sbix_memes(font_path, output_path, mappings, ppem=160, ppi=72, resize
         try:
             # Use a dedicated glyph for this code point (e.g. uniF900) so only U+F900 shows our bitmap
             glyph_name = f"uni{unicode_point:04X}"
-            ensure_glyph_exists(font, glyph_name, mono_advance, units_per_em)
+
+            # Terminals lay out wide code points across two cells, so the glyph's
+            # advance must span both. Otherwise the bitmap is confined to half the
+            # space the terminal reserved and renders smaller than system emoji.
+            cells = cells_for_codepoint(unicode_point)
+            advance = mono_advance * cells
+
+            ensure_glyph_exists(font, glyph_name, advance, units_per_em)
             glyph_order = font.getGlyphOrder()
             glyph_id = glyph_order.index(glyph_name) if glyph_name in glyph_order else -1
 
@@ -247,17 +280,19 @@ def inject_sbix_memes(font_path, output_path, mappings, ppem=160, ppi=72, resize
 
             # Resize meme and center it on a canvas matching the cell proportions.
             # Canvas height = ppem (full em square), canvas width scaled to match
-            # the monospace advance width so the image fits within the terminal cell.
+            # the advance width so the image fills the terminal cells it occupies.
             graphic_type = None
-            canvas_w = int(ppem * mono_advance / units_per_em)
+            canvas_w = int(ppem * advance / units_per_em)
             img_width = canvas_w
             img_height = ppem
 
             if resize:
                 try:
-                    content = min(emoji_height, canvas_w - margin)
+                    margin = strike_margin(ppem)
                     meme_data, img_width, img_height = resize_image_to_emoji(
-                        meme_data, content_size=content,
+                        meme_data,
+                        content_width=canvas_w - margin,
+                        content_height=ppem - margin,
                         canvas_width=canvas_w, canvas_height=ppem,
                         y_offset=0
                     )
@@ -292,7 +327,7 @@ def inject_sbix_memes(font_path, output_path, mappings, ppem=160, ppi=72, resize
             originOffsetY = -descent_shift
             
             print(f"  U+{unicode_point:04X} ({chr(unicode_point)}) -> glyph '{glyph_name}' (ID: {glyph_id}) <- {Path(meme_path).name}")
-            print(f"    Size: {img_width}x{img_height}, Offsets: ({originOffsetX}, {originOffsetY})")
+            print(f"    Size: {img_width}x{img_height}, Cells: {cells}, Offsets: ({originOffsetX}, {originOffsetY})")
             
             # Create glyph bitmap data
             glyph_bitmap = SbixGlyph(
@@ -308,10 +343,10 @@ def inject_sbix_memes(font_path, output_path, mappings, ppem=160, ppi=72, resize
             # Add to main strike
             strike.glyphs[glyph_name] = glyph_bitmap
             
-            # Set advance width to match the monospace cell width so the glyph
-            # aligns correctly within a single terminal cell.
+            # Set advance width to span the terminal cells this code point
+            # occupies, so the glyph aligns with the cell grid.
             if 'hmtx' in font:
-                font['hmtx'].metrics[glyph_name] = (mono_advance, 0)
+                font['hmtx'].metrics[glyph_name] = (advance, 0)
             
             # Ensure this code point maps to our glyph in all Unicode cmap subtables
             # (so the requested U+F900 etc. always show our bitmap regardless of which subtable the OS uses)
@@ -327,13 +362,13 @@ def inject_sbix_memes(font_path, output_path, mappings, ppem=160, ppi=72, resize
                     continue
 
                 try:
-                    scaled_canvas_w = int(strike_ppem * mono_advance / units_per_em)
-                    scaled_emoji_height = strike_ppem - margin
-                    scaled_content = min(scaled_emoji_height, scaled_canvas_w - margin)
+                    scaled_canvas_w = int(strike_ppem * advance / units_per_em)
+                    scaled_margin = strike_margin(strike_ppem)
                     scaled_descent_shift = int(descent * strike_ppem / (2 * units_per_em))
                     scaled_data, _, _ = resize_image_to_emoji(
                         Path(meme_path).read_bytes(),
-                        content_size=scaled_content,
+                        content_width=scaled_canvas_w - scaled_margin,
+                        content_height=strike_ppem - scaled_margin,
                         canvas_width=scaled_canvas_w, canvas_height=strike_ppem,
                         y_offset=0
                     )

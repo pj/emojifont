@@ -8,6 +8,7 @@ from PIL import Image
 from fontTools.ttLib import TTFont
 
 from emojifont.inject import (
+    cells_for_codepoint,
     ensure_glyph_exists,
     inject_sbix_memes,
     parse_mappings,
@@ -58,45 +59,81 @@ class TestParseMappings:
 
 class TestResizeImageToEmoji:
     def test_square_image_on_square_canvas(self, red_png_bytes):
-        data, w, h = resize_image_to_emoji(red_png_bytes, 100, 100, 100)
+        data, w, h = resize_image_to_emoji(red_png_bytes, 100, 100, 100, 100)
         img = Image.open(io.BytesIO(data))
         assert img.size == (100, 100)
         assert img.mode == "RGBA"
 
-    def test_tall_image_fits_content_size(self, tall_png_bytes):
-        data, w, h = resize_image_to_emoji(tall_png_bytes, 80, 96, 160)
+    def test_tall_image_limited_by_height(self, tall_png_bytes):
+        """A 32x128 image in a 188x156 box is height-bound: 39x156."""
+        data, w, h = resize_image_to_emoji(tall_png_bytes, 188, 156, 192, 160)
         img = Image.open(io.BytesIO(data))
-        assert img.size == (96, 160)
-        # The tall image (32x128) scaled to content_size=80 means height=80, width=20
-        # It should be centered on the 96x160 canvas
+        assert img.size == (192, 160)
+        assert img.getbbox()[3] - img.getbbox()[1] == 156
 
-    def test_wide_image_fits_content_size(self, wide_png_bytes):
-        data, w, h = resize_image_to_emoji(wide_png_bytes, 80, 96, 160)
+    def test_wide_image_limited_by_width(self, wide_png_bytes):
+        """A 128x32 image in a 188x156 box is width-bound: 188x47."""
+        data, w, h = resize_image_to_emoji(wide_png_bytes, 188, 156, 192, 160)
         img = Image.open(io.BytesIO(data))
-        assert img.size == (96, 160)
+        bbox = img.getbbox()
+        assert bbox[2] - bbox[0] == 188
+        assert bbox[3] - bbox[1] == 47
+
+    def test_non_square_image_fills_content_box(self, tmp_path):
+        """A 4:3 meme must fill the box's width, not shrink to a square.
+
+        Fitting to an inscribed square would cap the height at 3/4 of the em,
+        which is what made memes look short next to system emoji.
+        """
+        img = Image.new("RGBA", (347, 281), (0, 255, 0, 255))  # pepe's aspect
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        data, _, _ = resize_image_to_emoji(buf.getvalue(), 188, 156, 192, 160)
+        bbox = Image.open(io.BytesIO(data)).getbbox()
+        height = bbox[3] - bbox[1]
+        assert height >= 150  # vs 152 with contain-fit, 126 with square fit
 
     def test_canvas_dimensions_returned(self, red_png_bytes):
-        data, w, h = resize_image_to_emoji(red_png_bytes, 80, 96, 160)
+        data, w, h = resize_image_to_emoji(red_png_bytes, 92, 156, 96, 160)
         assert w == 96
         assert h == 160
 
     def test_y_offset_shifts_content(self, red_png_bytes):
-        data_no_offset, _, _ = resize_image_to_emoji(red_png_bytes, 80, 100, 100, y_offset=0)
-        data_offset, _, _ = resize_image_to_emoji(red_png_bytes, 80, 100, 100, y_offset=20)
+        data_no_offset, _, _ = resize_image_to_emoji(red_png_bytes, 80, 80, 100, 100, y_offset=0)
+        data_offset, _, _ = resize_image_to_emoji(red_png_bytes, 80, 80, 100, 100, y_offset=20)
         # Different images due to offset
         assert data_no_offset != data_offset
 
     def test_output_is_png(self, red_png_bytes):
-        data, _, _ = resize_image_to_emoji(red_png_bytes, 80, 96, 160)
+        data, _, _ = resize_image_to_emoji(red_png_bytes, 92, 156, 96, 160)
         assert data[:4] == b"\x89PNG"
 
     def test_proportional_canvas(self, red_png_bytes):
-        """Canvas width should be proportional to mono_advance/units_per_em."""
-        # Simulating Monaco: mono_advance=1229, units_per_em=2048, ppem=160
-        canvas_w = int(160 * 1229 / 2048)  # = 96
-        data, w, h = resize_image_to_emoji(red_png_bytes, 92, canvas_w, 160)
+        """Canvas width should be proportional to advance/units_per_em."""
+        # Simulating Monaco two-cell: advance=2458, units_per_em=2048, ppem=160
+        canvas_w = int(160 * 2458 / 2048)  # = 192
+        data, w, h = resize_image_to_emoji(red_png_bytes, canvas_w - 4, 156, canvas_w, 160)
         img = Image.open(io.BytesIO(data))
-        assert img.size == (96, 160)
+        assert img.size == (192, 160)
+
+
+# ---------------------------------------------------------------------------
+# cells_for_codepoint
+# ---------------------------------------------------------------------------
+
+class TestCellsForCodepoint:
+    @pytest.mark.parametrize("cp", [0xF900, 0xF901, 0xFAFF])
+    def test_cjk_compatibility_ideographs_are_wide(self, cp):
+        assert cells_for_codepoint(cp) == 2
+
+    @pytest.mark.parametrize("cp", [0x1F600, 0x1F680, 0x1F525])
+    def test_emoji_are_wide(self, cp):
+        """Memes must match the cell span of the emoji they sit alongside."""
+        assert cells_for_codepoint(cp) == 2
+
+    @pytest.mark.parametrize("cp", [0xE000, 0xF8FF, 0x0041])
+    def test_pua_and_ascii_are_narrow(self, cp):
+        assert cells_for_codepoint(cp) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -216,8 +253,8 @@ class TestInjectSbixMemes:
         assert cmap[0xF900] == "uniF900"
         font.close()
 
-    def test_advance_width_matches_monospace(self, minimal_font, test_image_path, tmp_path):
-        """Advance width of injected glyph must match existing monospace width."""
+    def test_advance_width_spans_two_cells_when_wide(self, minimal_font, test_image_path, tmp_path):
+        """U+F900 is East Asian Wide, so its advance covers two monospace cells."""
         out = tmp_path / "out.ttf"
         inject_sbix_memes(
             str(minimal_font), str(out),
@@ -226,7 +263,19 @@ class TestInjectSbixMemes:
         font = TTFont(str(out))
         mono_advance = font["hmtx"].metrics["A"][0]  # 600 in minimal font
         injected_advance = font["hmtx"].metrics["uniF900"][0]
-        assert injected_advance == mono_advance
+        assert injected_advance == mono_advance * 2
+        font.close()
+
+    def test_advance_width_one_cell_when_narrow(self, minimal_font, test_image_path, tmp_path):
+        """PUA code points are one cell wide, so the advance must not be doubled."""
+        out = tmp_path / "out.ttf"
+        inject_sbix_memes(
+            str(minimal_font), str(out),
+            {0xE000: str(test_image_path)},
+        )
+        font = TTFont(str(out))
+        mono_advance = font["hmtx"].metrics["A"][0]
+        assert font["hmtx"].metrics["uniE000"][0] == mono_advance
         font.close()
 
     def test_multiple_strikes_created(self, minimal_font, test_image_path, tmp_path):
@@ -267,10 +316,29 @@ class TestInjectSbixMemes:
         font = TTFont(str(out))
         glyph = font["sbix"].strikes[160].glyphs["uniF900"]
         img = Image.open(io.BytesIO(glyph.imageData))
-        # minimal font: advance=600, UPM=1000
-        expected_w = int(160 * 600 / 1000)  # 96
+        # minimal font: advance=600, UPM=1000; U+F900 spans two cells
+        expected_w = int(160 * 1200 / 1000)  # 192
         assert img.size[0] == expected_w
         assert img.size[1] == 160
+        font.close()
+
+    def test_artwork_fills_em_square_when_wide(self, minimal_font, test_image_path, tmp_path):
+        """A two-cell canvas is wider than tall, so artwork fills the full em height.
+
+        This is what makes memes render at the same visual size as system emoji;
+        a one-cell canvas would clamp them to the narrower cell width.
+        """
+        out = tmp_path / "out.ttf"
+        inject_sbix_memes(
+            str(minimal_font), str(out),
+            {0xF900: str(test_image_path)},
+            ppem=160,
+        )
+        font = TTFont(str(out))
+        img = Image.open(io.BytesIO(font["sbix"].strikes[160].glyphs["uniF900"].imageData))
+        bbox = img.getbbox()  # non-transparent extent of the artwork
+        assert bbox is not None
+        assert bbox[3] - bbox[1] == 156  # ppem - margin, i.e. the full em square
         font.close()
 
     def test_multiple_mappings(self, minimal_font, test_image_path, second_image_path, tmp_path):
@@ -337,17 +405,18 @@ class TestInjectSbixMemes:
 
 class TestWithMonacoFont:
     def test_advance_width_matches_monaco(self, base_font_path, test_image_path, tmp_path):
+        """Monaco cell is 1229 units; U+F900 is wide, so it spans two of them."""
         out = tmp_path / "monaco_out.ttf"
         inject_sbix_memes(
             str(base_font_path), str(out),
             {0xF900: str(test_image_path)},
         )
         font = TTFont(str(out))
-        assert font["hmtx"].metrics["uniF900"][0] == 1229
+        assert font["hmtx"].metrics["uniF900"][0] == 2458
         font.close()
 
-    def test_canvas_width_96_at_ppem_160(self, base_font_path, test_image_path, tmp_path):
-        """Monaco: 160 * 1229 / 2048 = 96 pixels wide."""
+    def test_canvas_width_192_at_ppem_160(self, base_font_path, test_image_path, tmp_path):
+        """Monaco: 160 * 2458 / 2048 = 192 pixels wide."""
         out = tmp_path / "monaco_out.ttf"
         inject_sbix_memes(
             str(base_font_path), str(out),
@@ -357,7 +426,31 @@ class TestWithMonacoFont:
         font = TTFont(str(out))
         glyph = font["sbix"].strikes[160].glyphs["uniF900"]
         img = Image.open(io.BytesIO(glyph.imageData))
-        assert img.size == (96, 160)
+        assert img.size == (192, 160)
+        font.close()
+
+    def test_all_strikes_fill_em_height(self, base_font_path, tmp_path):
+        """Every strike must fill ~the full em, including the small ones.
+
+        A fixed pixel margin is negligible at 160 ppem but eats 20% of a 20 ppem
+        strike, so memes would shrink relative to emoji at small terminal sizes.
+        Uses a 4:3 image, the case most sensitive to how the fit is computed.
+        """
+        meme = tmp_path / "wide_meme.png"
+        Image.new("RGBA", (347, 281), (0, 255, 0, 255)).save(meme)
+        out = tmp_path / "monaco_out.ttf"
+        inject_sbix_memes(
+            str(base_font_path), str(out),
+            {0xF900: str(meme)},
+            ppem=160,
+        )
+        font = TTFont(str(out))
+        for ppem, strike in font["sbix"].strikes.items():
+            if "uniF900" not in strike.glyphs:
+                continue
+            bbox = Image.open(io.BytesIO(strike.glyphs["uniF900"].imageData)).getbbox()
+            height = bbox[3] - bbox[1]
+            assert height / ppem >= 0.90, f"Strike {ppem}: artwork only {height}/{ppem} tall"
         font.close()
 
     def test_scaled_strikes_proportional(self, base_font_path, test_image_path, tmp_path):
@@ -372,7 +465,7 @@ class TestWithMonacoFont:
         for ppem, strike in font["sbix"].strikes.items():
             if "uniF900" in strike.glyphs:
                 img = Image.open(io.BytesIO(strike.glyphs["uniF900"].imageData))
-                expected_w = int(ppem * 1229 / 2048)
+                expected_w = int(ppem * 2458 / 2048)
                 assert img.size[0] == expected_w, f"Strike {ppem}: expected width {expected_w}, got {img.size[0]}"
                 assert img.size[1] == ppem
         font.close()

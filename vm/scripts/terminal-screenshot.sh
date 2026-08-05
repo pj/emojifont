@@ -21,12 +21,20 @@ set -euo pipefail
 FONT_PATH="${1:?Usage: terminal-screenshot.sh <font-path> <output-dir> [codepoints...]}"
 OUTPUT_DIR="${2:?Usage: terminal-screenshot.sh <font-path> <output-dir> [codepoints...]}"
 shift 2
-CODEPOINTS=("${@:-F900 F901}")
+# Note: ("${@:-F900 F901}") would collapse the default into a single element
+# "F900 F901" rather than two, so spell the fallback out.
+if [ $# -gt 0 ]; then
+    CODEPOINTS=("$@")
+else
+    CODEPOINTS=(F900 F901)
+fi
 
 RELEASE_URL="https://github.com/pj/iTerm2/releases/download/v0.0.1/MemeTerminal.zip"
 APP_NAME="MemeTerminal"
 
 mkdir -p "$OUTPUT_DIR"
+# Clear previous captures so the pass check can't be satisfied by stale files
+rm -f "$OUTPUT_DIR"/memeterminal_*.png
 
 echo "=== MemeTerminal Screenshot Test ==="
 echo "Font: $FONT_PATH"
@@ -63,7 +71,45 @@ fi
 # --------------------------------------------------------------------------- #
 # 3. Create display script                                                     #
 # --------------------------------------------------------------------------- #
-echo "[3/7] Creating display script..."
+echo "[3/7] Creating display scripts..."
+
+# Helper: convert hex codepoint to UTF-8 byte escape sequences
+cp_to_utf8() {
+    local DEC=$((16#$1))
+    if [ $DEC -le 127 ]; then
+        printf '\\x%02x' $DEC
+    elif [ $DEC -le 2047 ]; then
+        printf '\\x%02x\\x%02x' $(( 0xC0 | (DEC >> 6) )) $(( 0x80 | (DEC & 0x3F) ))
+    elif [ $DEC -le 65535 ]; then
+        printf '\\x%02x\\x%02x\\x%02x' $(( 0xE0 | (DEC >> 12) )) $(( 0x80 | ((DEC >> 6) & 0x3F) )) $(( 0x80 | (DEC & 0x3F) ))
+    else
+        printf '\\x%02x\\x%02x\\x%02x\\x%02x' $(( 0xF0 | (DEC >> 18) )) $(( 0x80 | ((DEC >> 12) & 0x3F) )) $(( 0x80 | ((DEC >> 6) & 0x3F) )) $(( 0x80 | (DEC & 0x3F) ))
+    fi
+}
+
+# Build meme glyph sequences: MEME_CHARS is space-separated, MEME_LIST holds
+# the individual glyphs so the adjacency cases can butt them up against each
+# other with nothing in between.
+MEME_CHARS=""
+MEME_LIST=()
+for cp in "${CODEPOINTS[@]}"; do
+    ch=$(cp_to_utf8 "$cp")
+    MEME_LIST+=("$ch")
+    MEME_CHARS="${MEME_CHARS}${ch} "
+done
+M1="${MEME_LIST[0]}"
+M2="${MEME_LIST[1]:-${MEME_LIST[0]}}"
+
+# Standard emoji for comparison
+GRIN=$(cp_to_utf8 1F600)        # 😀
+ROCKET=$(cp_to_utf8 1F680)      # 🚀
+FIRE=$(cp_to_utf8 1F525)        # 🔥
+STAR=$(cp_to_utf8 2B50)         # ⭐
+THUMBSUP=$(cp_to_utf8 1F44D)    # 👍
+HEART=$(cp_to_utf8 2764)        # ❤
+EYES=$(cp_to_utf8 1F440)        # 👀
+HUNDRED=$(cp_to_utf8 1F4AF)     # 💯
+EMOJI_CHARS="${GRIN} ${ROCKET} ${FIRE} ${STAR} ${THUMBSUP} ${HEART} ${EYES} ${HUNDRED}"
 
 DISPLAY_SCRIPT="/tmp/meme-display.sh"
 {
@@ -73,38 +119,6 @@ DISPLAY_SCRIPT="/tmp/meme-display.sh"
     echo 'echo "============================"'
     echo 'echo ""'
     echo 'echo "Regular text: Hgpy ABC 123"'
-
-    # Helper: convert hex codepoint to UTF-8 byte escape sequences
-    cp_to_utf8() {
-        local DEC=$((16#$1))
-        if [ $DEC -le 127 ]; then
-            printf '\\x%02x' $DEC
-        elif [ $DEC -le 2047 ]; then
-            printf '\\x%02x\\x%02x' $(( 0xC0 | (DEC >> 6) )) $(( 0x80 | (DEC & 0x3F) ))
-        elif [ $DEC -le 65535 ]; then
-            printf '\\x%02x\\x%02x\\x%02x' $(( 0xE0 | (DEC >> 12) )) $(( 0x80 | ((DEC >> 6) & 0x3F) )) $(( 0x80 | (DEC & 0x3F) ))
-        else
-            printf '\\x%02x\\x%02x\\x%02x\\x%02x' $(( 0xF0 | (DEC >> 18) )) $(( 0x80 | ((DEC >> 12) & 0x3F) )) $(( 0x80 | ((DEC >> 6) & 0x3F) )) $(( 0x80 | (DEC & 0x3F) ))
-        fi
-    }
-
-    # Build meme glyph sequences
-    MEME_CHARS=""
-    for cp in "${CODEPOINTS[@]}"; do
-        MEME_CHARS="${MEME_CHARS}$(cp_to_utf8 "$cp") "
-    done
-
-    # Standard emoji for comparison
-    GRIN=$(cp_to_utf8 1F600)        # 😀
-    ROCKET=$(cp_to_utf8 1F680)      # 🚀
-    FIRE=$(cp_to_utf8 1F525)        # 🔥
-    STAR=$(cp_to_utf8 2B50)         # ⭐
-    THUMBSUP=$(cp_to_utf8 1F44D)    # 👍
-    HEART=$(cp_to_utf8 2764)        # ❤
-    EYES=$(cp_to_utf8 1F440)        # 👀
-    HUNDRED=$(cp_to_utf8 1F4AF)     # 💯
-    EMOJI_CHARS="${GRIN} ${ROCKET} ${FIRE} ${STAR} ${THUMBSUP} ${HEART} ${EYES} ${HUNDRED}"
-
     echo "printf 'Memes inline: Hello ${MEME_CHARS}World\n'"
     echo "printf 'Memes only:   ${MEME_CHARS}\n'"
     echo 'echo ""'
@@ -112,11 +126,59 @@ DISPLAY_SCRIPT="/tmp/meme-display.sh"
     echo "printf 'Mixed:        ${GRIN} ${MEME_CHARS}${ROCKET} text ${FIRE}\n'"
     echo 'echo ""'
     echo 'echo "============================"'
-    echo 'echo ""'
+    echo 'export BASH_SILENCE_DEPRECATION_WARNING=1'
     echo 'exec bash'
 } > "$DISPLAY_SCRIPT"
 chmod +x "$DISPLAY_SCRIPT"
 echo "  Display script: $DISPLAY_SCRIPT"
+
+# --------------------------------------------------------------------------- #
+# Adjacency script: glyphs directly abutting, no separating spaces.            #
+#                                                                              #
+# This is where cell-overlap bugs surface. A meme whose bitmap is wider than    #
+# its advance, or whose advance doesn't match the cells the terminal reserved,  #
+# looks fine when padded with spaces but clips or overlaps its neighbour when   #
+# something is drawn immediately next to it. Every row starts at column 12 and  #
+# a ruler sits on top, so a glyph landing off the cell grid is visible.         #
+# --------------------------------------------------------------------------- #
+ADJACENCY_SCRIPT="/tmp/meme-adjacency.sh"
+{
+    echo '#!/bin/bash'
+    # Scroll the previous page off rather than `clear`: clearing scrollback
+    # trips an iTerm2 permission dialog that covers the top rows of output.
+    echo "printf '\\n%.0s' \$(seq 1 40)"
+    echo 'echo ""'
+    echo 'echo "Adjacency test - no separating spaces"'
+    echo 'echo "====================================="'
+    echo 'echo ""'
+    echo "printf 'ruler       0123456789012345678901234567890123456789\n'"
+    # Memes packed against memes — the densest case for advance-width errors
+    echo "printf 'meme+meme   ${M1}${M2}${M1}${M2}\n'"
+    echo "printf 'same meme   ${M1}${M1}${M1}${M1}\n'"
+    # Emoji baseline: these are known-good 2-cell glyphs to compare against
+    echo "printf 'emoji       ${GRIN}${ROCKET}${FIRE}${STAR}${THUMBSUP}\n'"
+    # Memes against emoji — mismatched advances show up as drift along the row
+    echo "printf 'meme+emoji  ${M1}${GRIN}${M2}${ROCKET}${M1}${FIRE}\n'"
+    # Memes against narrow text — the asymmetric case (2 cells beside 1)
+    echo "printf 'meme+text   A${M1}B${M2}C${M1}D\n'"
+    echo "printf 'emoji+text  A${GRIN}B${ROCKET}C${FIRE}D\n'"
+    echo "printf 'text        ABCDEFGHIJKLMNOPQRST\n'"
+    echo "printf 'all mixed   a${M1}${GRIN}b${M2}${ROCKET}c\n'"
+    # Explicit space runs: a meme that over-draws will eat into these
+    echo "printf 'gap 1       ${M1} ${M1} ${M1} ${M1}\n'"
+    echo "printf 'gap 2       ${M1}  ${M1}  ${M1}  ${M1}\n'"
+    echo "printf 'gap 3       ${M1}   ${M1}   ${M1}\n'"
+    # Line edges: leading glyph and a glyph with text hard against both sides
+    echo "printf '${M1}text${M2}text${M1}\n'"
+    echo "printf 'trailing    text${M1}\n'"
+    echo 'echo "====================================="'
+    # Silence bash's zsh-deprecation notice; it costs 4 rows, and the adjacency
+    # page needs every row it can get to fit on screen without scrolling.
+    echo 'export BASH_SILENCE_DEPRECATION_WARNING=1'
+    echo 'exec bash'
+} > "$ADJACENCY_SCRIPT"
+chmod +x "$ADJACENCY_SCRIPT"
+echo "  Adjacency script: $ADJACENCY_SCRIPT"
 
 # --------------------------------------------------------------------------- #
 # 4. Configure MemeTerminal profile                                            #
@@ -213,19 +275,22 @@ echo "[6/7] Running display script..."
 osascript -e "tell application \"System Events\" to tell process \"iTerm2\" to keystroke \" \"" 2>/dev/null || true
 sleep 1
 
-# Type the display script path (using System Events keystrokes)
-osascript -e "
+# Type a script path into the terminal and run it (via System Events keystrokes)
+run_in_terminal() {
+    osascript -e "
 tell application \"System Events\"
     tell process \"iTerm2\"
         set frontmost to true
         delay 0.5
-        keystroke \"/tmp/meme-display.sh\"
+        keystroke \"$1\"
         delay 0.3
         keystroke return
     end tell
 end tell
 " 2>/dev/null || true
+}
 
+run_in_terminal "$DISPLAY_SCRIPT"
 sleep 4
 
 # --------------------------------------------------------------------------- #
@@ -235,12 +300,19 @@ echo "[7/7] Capturing screenshots..."
 
 screencapture -x "$OUTPUT_DIR/memeterminal_fullscreen.png" 2>/dev/null || true
 
+# Second page: the adjacency cases. Captured separately because both pages
+# together exceed the rows that fit on screen at this font size.
+echo "  Running adjacency script..."
+run_in_terminal "$ADJACENCY_SCRIPT"
+sleep 4
+screencapture -x "$OUTPUT_DIR/memeterminal_adjacency.png" 2>/dev/null || true
+
 # Quit MemeTerminal
 killall iTerm2 2>/dev/null || true
 
 # Check what we got
 SCREENSHOTS=$(ls "$OUTPUT_DIR"/memeterminal_*.png 2>/dev/null | wc -l | tr -d ' ')
-if [ "$SCREENSHOTS" -gt 0 ]; then
+if [ "$SCREENSHOTS" -ge 2 ]; then
     echo ""
     echo "=== Screenshots captured ==="
     ls -la "$OUTPUT_DIR"/memeterminal_*.png
@@ -248,7 +320,7 @@ if [ "$SCREENSHOTS" -gt 0 ]; then
     echo "RESULT: PASS — $SCREENSHOTS screenshot(s) saved"
 else
     echo ""
-    echo "RESULT: FAIL — no screenshots captured"
+    echo "RESULT: FAIL — expected 2 screenshots (render + adjacency), got $SCREENSHOTS"
     echo "NOTE: Screen recording permission for com.apple.sshd-session must be"
     echo "      granted manually on first run (click Allow on the dialog)."
     exit 1
