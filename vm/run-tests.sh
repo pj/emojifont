@@ -157,7 +157,26 @@ usage() {
     echo "  --screenshot        Launch MemeTerminal in VM, render memes, and screenshot"
     echo "  --screenshot-only   Only run the MemeTerminal screenshot test"
     echo "  --codepoints CP    Comma-separated hex codepoints (default: F900,F901)"
+    echo "  --font PATH        Use this already-built font instead of rebuilding one from"
+    echo "                     font_build/memes/. If --codepoints isn't also given, every"
+    echo "                     meme code point actually present in the font is used."
     echo ""
+}
+
+# Read the U+F900-U+FAFF code points actually present in a font's cmap, as a
+# comma-separated hex list — so --font can be pointed at any generated font
+# (e.g. one built via the web UI) without having to know or retype its
+# mappings by hand.
+codepoints_from_font() {
+    local font_path=$1
+    "$PROJECT_DIR/.venv/bin/python" -c "
+from fontTools.ttLib import TTFont
+f = TTFont('$font_path')
+cmap = f.getBestCmap()
+cps = sorted(cp for cp in cmap if 0xF900 <= cp <= 0xFAFF)
+print(','.join(f'{cp:04X}' for cp in cps))
+f.close()
+"
 }
 
 run_tests() {
@@ -166,7 +185,9 @@ run_tests() {
     local run_render=true
     local run_screenshot=false
     local codepoints="F900,F901"
+    local codepoints_explicit=false
     local font_built=false
+    local custom_font=""
 
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -175,7 +196,8 @@ run_tests() {
             --render-only)      run_unit=false;                  shift ;;
             --screenshot)       run_screenshot=true;             shift ;;
             --screenshot-only)  run_screenshot=true; run_unit=false; run_render=false; shift ;;
-            --codepoints)       codepoints="$2";                shift 2 ;;
+            --codepoints)       codepoints="$2"; codepoints_explicit=true; shift 2 ;;
+            --font)             custom_font="$2";               shift 2 ;;
             --help|-h)          usage; exit 0 ;;
             *)
                 log_error "Unknown option: $1"
@@ -184,6 +206,21 @@ run_tests() {
                 ;;
         esac
     done
+
+    if [ -n "$custom_font" ]; then
+        if [ ! -f "$custom_font" ]; then
+            log_error "Font not found: $custom_font"
+            exit 1
+        fi
+        if [ "$codepoints_explicit" = false ]; then
+            codepoints=$(codepoints_from_font "$custom_font")
+            if [ -z "$codepoints" ]; then
+                log_error "No U+F900-U+FAFF code points found in $custom_font"
+                exit 1
+            fi
+            log_info "Using code points from font: $codepoints"
+        fi
+    fi
 
     check_tart
     check_vm
@@ -262,9 +299,15 @@ run_tests() {
     # CoreText rendering tests                                             #
     # ------------------------------------------------------------------ #
     if [ "$run_render" = true ]; then
-        log_info "Building test font..."
-        build_test_font "$ip"
-        local build_exit=$?
+        local build_exit=0
+        if [ -n "$custom_font" ]; then
+            log_info "Uploading font: $custom_font"
+            rsync_to_vm "$ip" "$custom_font" "/tmp/TestMemeFont.ttf"
+        else
+            log_info "Building test font..."
+            build_test_font "$ip"
+            build_exit=$?
+        fi
         font_built=true
 
         if [ $build_exit -eq 2 ]; then
@@ -297,9 +340,14 @@ run_tests() {
     # MemeTerminal screenshot test                                         #
     # ------------------------------------------------------------------ #
     if [ "$run_screenshot" = true ] && [ "$font_built" = false ]; then
-        log_info "Building test font for screenshot..."
-        build_test_font "$ip" \
-            || { log_warn "Font build failed — skipping screenshot"; run_screenshot=false; }
+        if [ -n "$custom_font" ]; then
+            log_info "Uploading font: $custom_font"
+            rsync_to_vm "$ip" "$custom_font" "/tmp/TestMemeFont.ttf"
+        else
+            log_info "Building test font for screenshot..."
+            build_test_font "$ip" \
+                || { log_warn "Font build failed — skipping screenshot"; run_screenshot=false; }
+        fi
     fi
 
     if [ "$run_screenshot" = true ]; then

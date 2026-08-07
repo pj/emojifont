@@ -5,21 +5,25 @@ The point is manual selection: `list` shows you what's available (optionally as
 an HTML contact sheet, since you can't judge a meme from its filename), and
 `get` downloads only the ones you name and prints the --mappings string for
 `emojifont`. `dump`/`ffz-dump` grab everything into a directory with a contact
-sheet so you can cherry-pick on disk instead.
+sheet so you can cherry-pick on disk instead; `dedupe` then collapses the
+exact-duplicate content that tends to accumulate across packs and sources.
 
     emojifont-fetch packs --search pepe
     emojifont-fetch list --pack 983085-pepe --html /tmp/sheet.html
     emojifont-fetch get pepehappy pepeok --out memes/
     emojifont-fetch ffz-dump --pages 100
+    emojifont-fetch dedupe --out font_build/memes-deduped
 
 Animated images are skipped by default: SBIX holds a single still per glyph,
 so an animated source would only ever show one frame.
 """
 
 import argparse
+import hashlib
 import html
 import json
 import os
+import shutil
 import sys
 import time
 import unicodedata
@@ -55,6 +59,10 @@ DEFAULT_START_CODEPOINT = 0xF900
 CODEPOINT_BLOCK_END = 0xFAFF
 
 STATIC_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
+# Static plus animated — the full set of "this is an image file" for browsing
+# and deduping purposes, as opposed to STATIC_SUFFIXES which is what's
+# actually usable in a generated SBIX font.
+IMAGE_SUFFIXES = STATIC_SUFFIXES + (".gif",)
 
 
 @dataclass
@@ -468,6 +476,147 @@ def write_contact_sheet(emojis, path, title="emojifont — pick your memes", src
 
 
 # --------------------------------------------------------------------------- #
+# Dedupe                                                                       #
+#                                                                              #
+# The dump commands produce a lot of exact-duplicate content: the same meme   #
+# gets uploaded to multiple packs, or independently to both emoji.gg and      #
+# FrankerFaceZ. That's a different problem from claim_filename()'s: this      #
+# dedupes by *file content* across everything already on disk, not by *name*  #
+# among files about to be written in one run.                                #
+# --------------------------------------------------------------------------- #
+
+def default_dump_dirs(project_root):
+    """The directories the dump/ffz-dump commands write to, plus the curated
+    memes/ directory — the default place to look for duplicates."""
+    candidates = [
+        Path(project_root) / "font_build" / "meme-dump",
+        Path(project_root) / "font_build" / "ffz-dump",
+        Path(project_root) / "font_build" / "memes",
+    ]
+    return [d for d in candidates if d.is_dir()]
+
+
+def iter_candidate_files(dirs):
+    """Yield image files from `dirs` in stable "first found wins" order:
+    directories in the order given, files within each directory sorted.
+
+    That order is what makes "the id of the meme is the name of the first
+    one found" well-defined — callers should list directories in the
+    precedence they want ties broken.
+    """
+    for d in dirs:
+        d = Path(d)
+        if not d.is_dir():
+            continue
+        for path in sorted(d.rglob("*")):
+            if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES:
+                yield path
+
+
+def hash_file(path, chunk_size=1 << 20):
+    """SHA-256 of a file's contents, read in chunks so file size doesn't matter."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(chunk_size), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _hash_or_error(path):
+    try:
+        return path, hash_file(path), None
+    except OSError as exc:
+        return path, None, exc
+
+
+def claim_output_name(path, taken):
+    """Pick a collision-free destination filename for a deduped survivor.
+
+    Two *different* memes can share a filename across source directories
+    (e.g. two unrelated images both called "pepe.png" in different packs).
+    This only has to break ties among survivors of content-dedup, so it's
+    rare — but silently letting one overwrite the other on copy would be
+    worse than an ugly name. Escalates bare name -> source-qualified name ->
+    numeric suffix, the same ladder claim_filename() uses in the dump
+    commands, including tracking claims case-insensitively: macOS (APFS) and
+    Windows treat "Pog.png" and "pog.png" as the same file even though
+    they're different Python strings, so a case-only difference must still
+    count as taken or one file quietly clobbers the other on disk.
+    """
+    stem, suffix = path.stem, path.suffix.lower()
+    source_label = path.parent.name
+    for candidate in (f"{stem}{suffix}", f"{stem}__{source_label}{suffix}"):
+        if candidate.lower() not in taken:
+            taken.add(candidate.lower())
+            return candidate
+    n = 2
+    while f"{stem}__{source_label}-{n}{suffix}".lower() in taken:
+        n += 1
+    name = f"{stem}__{source_label}-{n}{suffix}"
+    taken.add(name.lower())
+    return name
+
+
+@dataclass
+class DedupeResult:
+    kept: list        # [(source_path, dest_path)] — one dest_path per unique content hash
+    duplicates: list  # [(source_path, kept_source_path)] — files that were skipped, and why
+    errors: list       # [(source_path, exception)] — files that couldn't be hashed
+
+
+def dedupe_images(dirs, out_dir, jobs=8, hardlink=False, dry_run=False):
+    """Copy exactly one file per distinct content hash from `dirs` into `out_dir`.
+
+    Hashing happens in a thread pool (I/O-bound: thousands of small file
+    reads), but ThreadPoolExecutor.map() yields results in the same order the
+    inputs were submitted regardless of which thread finishes first — the
+    same ordering guarantee fetch_frankerfacez_pages() relies on — so "first
+    found wins" is still decided by iter_candidate_files()'s order, not by
+    hashing speed.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    files = list(iter_candidate_files(dirs))
+
+    if jobs > 1 and len(files) > 1:
+        with ThreadPoolExecutor(max_workers=jobs) as pool:
+            hashed = list(pool.map(_hash_or_error, files))
+    else:
+        hashed = [_hash_or_error(p) for p in files]
+
+    seen, kept_paths, duplicates, errors = {}, [], [], []
+    for path, digest, exc in hashed:
+        if exc is not None:
+            errors.append((path, exc))
+        elif digest in seen:
+            duplicates.append((path, seen[digest]))
+        else:
+            seen[digest] = path
+            kept_paths.append(path)
+
+    out_dir = Path(out_dir)
+    if not dry_run:
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+    taken, kept = set(), []
+    for path in kept_paths:
+        dest = out_dir / claim_output_name(path, taken)
+        if not dry_run:
+            if hardlink:
+                if dest.exists():
+                    dest.unlink()
+                try:
+                    os.link(path, dest)
+                except OSError:
+                    shutil.copy2(path, dest)  # e.g. cross-filesystem; fall back to a real copy
+            else:
+                shutil.copy2(path, dest)
+        kept.append((path, dest))
+
+    return DedupeResult(kept=kept, duplicates=duplicates, errors=errors)
+
+
+# --------------------------------------------------------------------------- #
 # CLI                                                                          #
 # --------------------------------------------------------------------------- #
 
@@ -571,7 +720,7 @@ def sheet_entries_from_disk(out_root):
     out_root = Path(out_root)
     entries, srcs = [], {}
     for path in sorted(out_root.rglob("*")):
-        if not path.is_file() or path.suffix.lower() not in STATIC_SUFFIXES + (".gif",):
+        if not path.is_file() or path.suffix.lower() not in IMAGE_SUFFIXES:
             continue
         rel = path.relative_to(out_root)
         group = rel.parent.name if rel.parent != Path(".") else ""
@@ -720,6 +869,46 @@ def cmd_get(args):
     return 0
 
 
+def cmd_dedupe(args):
+    """Collapse exact-duplicate images across one or more directories."""
+    dirs = [Path(d) for d in args.dirs] if args.dirs else default_dump_dirs(Path.cwd())
+    dirs = [d for d in dirs if d.is_dir()]
+    if not dirs:
+        raise SystemExit(
+            "No input directories found. Pass one or more directories, or run "
+            "emojifont-fetch dump / ffz-dump first (this defaults to their output)."
+        )
+    print(f"Scanning {len(dirs)} director(y/ies), in this precedence order:")
+    for d in dirs:
+        print(f"  {d}")
+
+    result = dedupe_images(dirs, args.out, jobs=args.jobs, hardlink=args.hardlink,
+                           dry_run=args.dry_run)
+
+    verb = "Would keep" if args.dry_run else "Kept"
+    note = f", {len(result.errors)} unreadable" if result.errors else ""
+    print(f"\n{verb} {len(result.kept)} unique image(s), "
+          f"skipped {len(result.duplicates)} duplicate(s){note}")
+    if not args.dry_run:
+        print(f"-> {args.out}")
+
+    if args.show_duplicates and result.duplicates:
+        print("\nduplicates (skipped -> kept as):")
+        for dupe_path, kept_path in result.duplicates[:50]:
+            print(f"  {dupe_path}  ==  {kept_path}")
+        if len(result.duplicates) > 50:
+            print(f"  ... {len(result.duplicates) - 50} more (use --show-duplicates with a "
+                  f"narrower --dir to see the rest)")
+
+    if result.errors:
+        print("\nunreadable, skipped:")
+        for path, exc in result.errors[:20]:
+            print(f"  {path}: {exc}")
+        if len(result.errors) > 20:
+            print(f"  ... {len(result.errors) - 20} more")
+    return 0
+
+
 def _hex_codepoint(s):
     return int(s.removeprefix("U+").removeprefix("u+"), 16)
 
@@ -736,6 +925,7 @@ def main(argv=None):
   emojifont-fetch get pepehappy pepeok --out memes/
   emojifont-fetch dump --out font_build/meme-dump
   emojifont-fetch ffz-dump --pages 100 --out font_build/ffz-dump
+  emojifont-fetch dedupe --out font_build/memes-deduped
 
 Images are user-submitted with mostly unmarked licensing — fine for personal
 use, check before redistributing.""",
@@ -800,6 +990,28 @@ use, check before redistributing.""",
     p_get.add_argument("--start-codepoint", type=_hex_codepoint, default=DEFAULT_START_CODEPOINT,
                        help="first code point to assign (default: F900)")
     p_get.set_defaults(func=cmd_get)
+
+    p_dedupe = sub.add_parser(
+        "dedupe", help="collapse exact-duplicate images across dump directories",
+        description="Hash every image under the given directories and keep only one "
+                    "copy per distinct content hash, named after the first file found "
+                    "with that content. Directories are scanned in the order given "
+                    "(files within a directory alphabetically) — that order decides "
+                    "which of several identical files is 'the first one'.",
+    )
+    p_dedupe.add_argument("dirs", nargs="*",
+                          help="directories to scan (default: font_build/meme-dump, "
+                               "font_build/ffz-dump, font_build/memes — whichever exist)")
+    p_dedupe.add_argument("--out", default="font_build/memes-deduped", help="output directory")
+    p_dedupe.add_argument("--jobs", type=int, default=8, help="parallel hashing (default 8)")
+    p_dedupe.add_argument("--hardlink", action="store_true",
+                          help="hardlink instead of copy (saves disk; falls back to a copy "
+                               "if the output is on a different filesystem)")
+    p_dedupe.add_argument("--dry-run", action="store_true",
+                          help="report what would happen without writing anything")
+    p_dedupe.add_argument("--show-duplicates", action="store_true",
+                          help="list which files were skipped as duplicates of which")
+    p_dedupe.set_defaults(func=cmd_dedupe)
 
     args = parser.parse_args(argv)
     try:

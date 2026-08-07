@@ -68,6 +68,34 @@ else
     echo "  Font already installed at $DEST_FONT"
 fi
 
+# Copying the file into ~/Library/Fonts is not reliably enough on its own:
+# CTFontCreateWithName() (what iTerm2's Dynamic Profile "Normal Font" lookup
+# uses under the hood) can silently resolve the name to Helvetica — and from
+# there fall back to a system CJK glyph for code points Helvetica doesn't
+# cover — until the font is explicitly registered with CoreText's font
+# database. CTFontManagerRegisterFontsForURL is what actually makes the
+# PostScript/family name resolvable by apps that pick fonts by name.
+REGISTER_SCRIPT="/tmp/register-font.swift"
+cat > "$REGISTER_SCRIPT" << 'SWIFT_EOF'
+import CoreText
+import Foundation
+
+guard CommandLine.arguments.count > 1 else {
+    print("Usage: register-font.swift <path>")
+    exit(1)
+}
+let url = URL(fileURLWithPath: CommandLine.arguments[1]) as CFURL
+var error: Unmanaged<CFError>?
+if CTFontManagerRegisterFontsForURL(url, .persistent, &error) {
+    print("Registered: \(CommandLine.arguments[1])")
+} else {
+    // Already-registered is reported as an error by this API; that's fine —
+    // it means a previous run already did this and the name still resolves.
+    print("Register call did not report success (often means already registered): \(String(describing: error))")
+}
+SWIFT_EOF
+swift "$REGISTER_SCRIPT" "$DEST_FONT" 2>&1 || true
+
 # --------------------------------------------------------------------------- #
 # 3. Create display script                                                     #
 # --------------------------------------------------------------------------- #
@@ -111,6 +139,25 @@ EYES=$(cp_to_utf8 1F440)        # 👀
 HUNDRED=$(cp_to_utf8 1F4AF)     # 💯
 EMOJI_CHARS="${GRIN} ${ROCKET} ${FIRE} ${STAR} ${THUMBSUP} ${HEART} ${EYES} ${HUNDRED}"
 
+# Gallery rows: explicit fixed-width chunks rather than one long line left to
+# the terminal's own wrapping. At more than a couple of memes, the "inline"/
+# "only"/"mixed" comparison lines below wrap mid-glyph-run and get hard to
+# scan, so a real gallery kicks in once there's more to show than that.
+GALLERY_COLS=20
+GALLERY_LINES=()
+if [ "${#MEME_LIST[@]}" -gt 2 ]; then
+    for ((i = 0; i < ${#MEME_LIST[@]}; i += GALLERY_COLS)); do
+        end=$((i + GALLERY_COLS - 1))
+        if [ $end -ge ${#MEME_LIST[@]} ]; then end=$((${#MEME_LIST[@]} - 1)); fi
+        chunk=""
+        for ((j = i; j <= end; j++)); do
+            chunk="${chunk}${MEME_LIST[$j]}"
+        done
+        label="U+${CODEPOINTS[$i]}-U+${CODEPOINTS[$end]}:"
+        GALLERY_LINES+=("printf '%-16s ${chunk}\n' '${label}'")
+    done
+fi
+
 DISPLAY_SCRIPT="/tmp/meme-display.sh"
 {
     echo '#!/bin/bash'
@@ -119,11 +166,21 @@ DISPLAY_SCRIPT="/tmp/meme-display.sh"
     echo 'echo "============================"'
     echo 'echo ""'
     echo 'echo "Regular text: Hgpy ABC 123"'
-    echo "printf 'Memes inline: Hello ${MEME_CHARS}World\n'"
-    echo "printf 'Memes only:   ${MEME_CHARS}\n'"
+    echo "printf 'Emoji:           ${EMOJI_CHARS}\n'"
     echo 'echo ""'
-    echo "printf 'Emoji:        ${EMOJI_CHARS}\n'"
-    echo "printf 'Mixed:        ${GRIN} ${MEME_CHARS}${ROCKET} text ${FIRE}\n'"
+    if [ "${#GALLERY_LINES[@]}" -gt 0 ]; then
+        # Many memes: skip the wrap-prone inline/only/mixed lines and show a
+        # clean fixed-width gallery instead.
+        echo 'echo "All memes:"'
+        for line in "${GALLERY_LINES[@]}"; do
+            echo "$line"
+        done
+    else
+        echo "printf 'Memes inline: Hello ${MEME_CHARS}World\n'"
+        echo "printf 'Memes only:   ${MEME_CHARS}\n'"
+        echo 'echo ""'
+        echo "printf 'Mixed:        ${GRIN} ${MEME_CHARS}${ROCKET} text ${FIRE}\n'"
+    fi
     echo 'echo ""'
     echo 'echo "============================"'
     echo 'export BASH_SILENCE_DEPRECATION_WARNING=1'

@@ -111,6 +111,10 @@ uv sync                 # create venv + install deps
 uv run emojifont --help
 ```
 
+A `justfile` wraps the commands below (and the VM/test-app ones further down)
+— run `just --list` to see everything, e.g. `just test`, `just fetch-packs pepe`,
+`just dedupe-dry-run`, `just web`.
+
 Source fonts and meme images live in `font_build/` (gitignored — images may be
 copyrighted). Build the test font into it:
 

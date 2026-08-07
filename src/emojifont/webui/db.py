@@ -16,11 +16,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from emojifont.fetch import STATIC_SUFFIXES
-
-# Animated formats are indexed too (so they're browsable and clearly marked)
-# but can't be selected for generation — SBIX holds one still per glyph.
-IMAGE_SUFFIXES = STATIC_SUFFIXES + (".gif",)
+from emojifont.fetch import IMAGE_SUFFIXES
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS memes (

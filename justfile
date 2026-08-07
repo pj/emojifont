@@ -1,0 +1,114 @@
+# emojifont — common developer commands.
+#
+# Run `just` or `just --list` to see every recipe. Most CLI-wrapping recipes
+# take `*args`, so any flag the underlying tool supports works even if there's
+# no dedicated recipe for it, e.g. `just fetch dump --overwrite --jobs 4`.
+
+set shell := ["bash", "-uc"]
+
+default:
+    @just --list
+
+# --- setup -------------------------------------------------------------------
+
+# Create the venv and install dependencies (uv sync)
+install:
+    uv sync
+
+# --- tests -------------------------------------------------------------------
+
+# Run the full Python test suite
+test:
+    uv run pytest tests/ -v
+
+# Run one test file or node id, e.g. `just test-one tests/test_inject.py::TestRenameFont`
+test-one target:
+    uv run pytest {{ target }} -v
+
+# --- font injection ------------------------------------------------------------
+
+# Inject images into a font: just inject base.ttf out.ttf "U+F900:a.png,U+F901:b.png" MemeFont
+inject base out mappings name="MemeFont":
+    uv run emojifont {{ base }} {{ out }} --mappings "{{ mappings }}" --font-name "{{ name }}"
+
+# Run any `emojifont` invocation directly, e.g. `just font --help`
+font *args:
+    uv run emojifont {{ args }}
+
+# Build the demo font from font_build/memes/ (mirrors the README example)
+build-test-font:
+    uv run emojifont font_build/MonacoNerdFontMono-Regular.ttf font_build/MemeFont.ttf \
+        --mappings "U+F900:font_build/memes/pepe.jpg,U+F901:font_build/memes/mofusand_shark.jpg" \
+        --font-name "MemeFont"
+
+# --- fetching memes --------------------------------------------------------------
+
+# Run any `emojifont-fetch` subcommand directly, e.g. `just fetch list --search shark`
+fetch *args:
+    uv run emojifont-fetch {{ args }}
+
+# List curated emoji.gg packs, optionally filtered by name
+fetch-packs search="":
+    uv run emojifont-fetch packs --search "{{ search }}"
+
+# Browse a pack or the whole index, with an optional HTML contact sheet
+fetch-list pack="" search="" html="":
+    uv run emojifont-fetch list --pack "{{ pack }}" --search "{{ search }}" --html "{{ html }}"
+
+# Bulk-download all emoji.gg packs (or --source slackmojis --no-packs)
+fetch-dump *args:
+    uv run emojifont-fetch dump {{ args }}
+
+# Bulk-download FrankerFaceZ emotes by popularity
+fetch-ffz-dump pages="100":
+    uv run emojifont-fetch ffz-dump --pages {{ pages }}
+
+# Download specific memes by name/id: just fetch-get pepehappy pepeok --out memes/
+fetch-get *args:
+    uv run emojifont-fetch get {{ args }}
+
+# Collapse exact-duplicate images across the dump directories
+dedupe *args:
+    uv run emojifont-fetch dedupe {{ args }}
+
+# Preview what dedupe would do, without writing anything
+dedupe-dry-run:
+    uv run emojifont-fetch dedupe --dry-run --show-duplicates
+
+# --- web UI ------------------------------------------------------------------------
+
+# Launch the meme picker web UI (http://127.0.0.1:8877 by default)
+web *args:
+    uv run emojifont-web {{ args }}
+
+# --- VM tests (macOS host, requires Tart) ---------------------------------------------
+
+# Run the full VM test suite: unit tests, CoreText rendering, MemeTerminal screenshot
+vm-test *args:
+    ./vm/run-tests.sh {{ args }}
+
+# Python unit tests only (no VM rendering)
+vm-test-unit:
+    ./vm/run-tests.sh --unit-only
+
+# CoreText rendering checks only
+vm-test-render:
+    ./vm/run-tests.sh --render-only
+
+# MemeTerminal screenshot test only
+vm-test-screenshot:
+    ./vm/run-tests.sh --screenshot-only
+
+# Full suite, keeping the VM running afterward for debugging
+vm-test-keep *args:
+    ./vm/run-tests.sh --keep {{ args }}
+
+# --- test app (macOS, requires Xcode) --------------------------------------------------
+
+# Build & run the SwiftUI test app
+app-run:
+    swift run --package-path FontTestApp FontTestApp
+
+# Headless: capture snapshots + alignment report into snapshots/
+app-diagnose:
+    swift run --package-path FontTestApp FontTestApp --diagnose
