@@ -81,34 +81,13 @@ dedupe-dry-run:
 web *args:
     uv run emojifont-web {{ args }}
 
-# --- VM tests (macOS host, requires Tart) ---------------------------------------------
+# --- VM test (macOS host, requires Tart) ----------------------------------------------
 
-# Run the full VM test suite: unit tests, CoreText rendering, MemeTerminal screenshot
+# MemeTerminal screenshot test (real terminal rendering). Pass --font <path> to use an existing font.
 vm-test *args:
     ./vm/run-tests.sh {{ args }}
 
-# Python unit tests only (no VM rendering)
-vm-test-unit:
-    ./vm/run-tests.sh --unit-only
-
-# CoreText rendering checks only
-vm-test-render:
-    ./vm/run-tests.sh --render-only
-
-# MemeTerminal screenshot test only
-vm-test-screenshot:
-    ./vm/run-tests.sh --screenshot-only
-
-# Full suite, keeping the VM running afterward for debugging
+# Same, keeping the VM running afterward for debugging
 vm-test-keep *args:
     ./vm/run-tests.sh --keep {{ args }}
 
-# --- test app (macOS, requires Xcode) --------------------------------------------------
-
-# Build & run the SwiftUI test app
-app-run:
-    swift run --package-path FontTestApp FontTestApp
-
-# Headless: capture snapshots + alignment report into snapshots/
-app-diagnose:
-    swift run --package-path FontTestApp FontTestApp --diagnose

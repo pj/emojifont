@@ -117,50 +117,45 @@ rsync_from_vm() {
         "${SSH_USER}@${ip}:${src}" "$dst"
 }
 
-# Build the test font in the VM from the freshly synced source.
-# Always rebuilds: a cached /tmp/TestMemeFont.ttf from an earlier run would
-# silently mask source changes and make the tests report on a stale font.
-build_test_font() {
-    local ip=$1
-    ssh_run "$ip" "
-        export PATH=\"\$HOME/.local/bin:\$PATH\"
-        cd ~/Projects/emojifont
-
-        if [ -f font_build/MonacoNerdFontMono-Regular.ttf ] && [ -d font_build/memes ]; then
-            # Build mappings from available meme images, starting at U+F900
-            MAPPINGS=''
-            CP=63744  # 0xF900
-            for img in font_build/memes/*; do
-                HEX=\$(printf '%04X' \$CP)
-                if [ -n \"\$MAPPINGS\" ]; then MAPPINGS=\"\$MAPPINGS,\"; fi
-                MAPPINGS=\"\${MAPPINGS}U+\${HEX}:\${img}\"
-                CP=\$((CP + 1))
-            done
-
-            rm -f /tmp/TestMemeFont.ttf
-            uv run emojifont font_build/MonacoNerdFontMono-Regular.ttf /tmp/TestMemeFont.ttf \\
-                --mappings \"\$MAPPINGS\" --font-name 'TestMemeFont' 2>&1
-        else
-            echo 'SKIP: font_build/MonacoNerdFontMono-Regular.ttf or font_build/memes/ not found'
-            exit 2
-        fi
-    "
-}
-
 usage() {
     echo "Usage: $0 [options]"
     echo ""
+    echo "Runs the MemeTerminal screenshot test: installs a fork of iTerm2 with"
+    echo "SBIX support in the VM, renders the memes in a real terminal, and"
+    echo "captures a screenshot."
+    echo ""
     echo "Options:"
-    echo "  --keep              Keep VM running after tests (for debugging)"
-    echo "  --unit-only         Run only Python unit tests (no CoreText rendering)"
-    echo "  --render-only       Run only CoreText rendering tests"
-    echo "  --screenshot        Launch MemeTerminal in VM, render memes, and screenshot"
-    echo "  --screenshot-only   Only run the MemeTerminal screenshot test"
+    echo "  --keep              Keep VM running after the test (for debugging)"
     echo "  --codepoints CP    Comma-separated hex codepoints (default: F900,F901)"
-    echo "  --font PATH        Use this already-built font instead of rebuilding one from"
+    echo "  --font PATH        Use this already-built font instead of building one from"
     echo "                     font_build/memes/. If --codepoints isn't also given, every"
     echo "                     meme code point actually present in the font is used."
     echo ""
+}
+
+# Build the test font locally from font_build/memes/, mirroring what
+# emojifont-web's default output does. Runs on the host, not the VM — the VM
+# only needs the resulting font file, not a Python environment.
+build_local_test_font() {
+    local out=$1
+    local base="$PROJECT_DIR/font_build/MonacoNerdFontMono-Regular.ttf"
+    local memes_dir="$PROJECT_DIR/font_build/memes"
+
+    if [ ! -f "$base" ] || [ ! -d "$memes_dir" ] || [ -z "$(ls -A "$memes_dir" 2>/dev/null)" ]; then
+        return 2
+    fi
+
+    local mappings="" cp=63744  # 0xF900
+    for img in "$memes_dir"/*; do
+        local hex
+        hex=$(printf '%04X' "$cp")
+        if [ -n "$mappings" ]; then mappings="$mappings,"; fi
+        mappings="${mappings}U+${hex}:${img}"
+        cp=$((cp + 1))
+    done
+
+    "$PROJECT_DIR/.venv/bin/emojifont" "$base" "$out" \
+        --mappings "$mappings" --font-name "TestMemeFont"
 }
 
 # Read the U+F900-U+FAFF code points actually present in a font's cmap, as a
@@ -179,23 +174,32 @@ f.close()
 "
 }
 
+# Read a font's PostScript name (name table ID 6) — what iTerm2's Dynamic
+# Profile needs to select it by name.
+ps_name_from_font() {
+    local font_path=$1
+    "$PROJECT_DIR/.venv/bin/python" -c "
+from fontTools.ttLib import TTFont
+f = TTFont('$font_path')
+name = 'MemeFont'
+for r in f['name'].names:
+    if r.nameID == 6:
+        name = r.toUnicode()
+        break
+print(name)
+f.close()
+"
+}
+
 run_tests() {
     local keep_vm=false
-    local run_unit=true
-    local run_render=true
-    local run_screenshot=false
-    local codepoints="F900,F901"
+    local codepoints=""
     local codepoints_explicit=false
-    local font_built=false
     local custom_font=""
 
     while [[ $# -gt 0 ]]; do
         case $1 in
             --keep)             keep_vm=true;                   shift ;;
-            --unit-only)        run_render=false;                shift ;;
-            --render-only)      run_unit=false;                  shift ;;
-            --screenshot)       run_screenshot=true;             shift ;;
-            --screenshot-only)  run_screenshot=true; run_unit=false; run_render=false; shift ;;
             --codepoints)       codepoints="$2"; codepoints_explicit=true; shift 2 ;;
             --font)             custom_font="$2";               shift 2 ;;
             --help|-h)          usage; exit 0 ;;
@@ -207,20 +211,45 @@ run_tests() {
         esac
     done
 
+    # ------------------------------------------------------------------ #
+    # Obtain the font, locally, before touching the VM at all              #
+    # ------------------------------------------------------------------ #
+    local font_path
     if [ -n "$custom_font" ]; then
         if [ ! -f "$custom_font" ]; then
             log_error "Font not found: $custom_font"
             exit 1
         fi
-        if [ "$codepoints_explicit" = false ]; then
-            codepoints=$(codepoints_from_font "$custom_font")
-            if [ -z "$codepoints" ]; then
-                log_error "No U+F900-U+FAFF code points found in $custom_font"
-                exit 1
-            fi
-            log_info "Using code points from font: $codepoints"
+        font_path="$custom_font"
+    else
+        # mktemp with a template suffix appends its own random string rather
+        # than honoring trailing characters after the X's (at least on BSD/
+        # macOS mktemp), so a plain `mktemp ... .ttf` doesn't give a file
+        # actually named *.ttf — use a scratch directory instead and name the
+        # file within it ourselves.
+        local scratch_dir
+        scratch_dir=$(mktemp -d -t emojifont-test)
+        font_path="$scratch_dir/TestMemeFont.ttf"
+        log_info "Building test font from font_build/memes/..."
+        if ! build_local_test_font "$font_path"; then
+            log_error "Could not build a test font — font_build/MonacoNerdFontMono-Regular.ttf" \
+                       "or font_build/memes/ not found. Pass --font to use an existing font instead."
+            exit 1
         fi
     fi
+
+    if [ "$codepoints_explicit" = false ]; then
+        codepoints=$(codepoints_from_font "$font_path")
+        if [ -z "$codepoints" ]; then
+            log_error "No U+F900-U+FAFF code points found in $font_path"
+            exit 1
+        fi
+    fi
+    log_info "Code points: $codepoints"
+
+    local ps_name
+    ps_name=$(ps_name_from_font "$font_path")
+    log_info "Font PostScript name: $ps_name"
 
     check_tart
     check_vm
@@ -231,18 +260,13 @@ run_tests() {
     fi
 
     # ------------------------------------------------------------------ #
-    # Boot VM                                                              #
+    # Boot VM (needs a GUI session to launch MemeTerminal and screenshot)  #
     # ------------------------------------------------------------------ #
     if is_vm_running; then
         log_info "VM already running"
     else
-        if [ "$run_screenshot" = true ]; then
-            log_info "Starting VM with display (screenshot mode)..."
-            tart run "$VM_NAME" &
-        else
-            log_info "Starting VM headlessly..."
-            tart run "$VM_NAME" --no-graphics &
-        fi
+        log_info "Starting VM with display..."
+        tart run "$VM_NAME" &
         sleep 5
     fi
 
@@ -261,122 +285,42 @@ run_tests() {
     log_info "VM IP: $ip"
     wait_for_ssh "$ip"
 
-    # ------------------------------------------------------------------ #
-    # Sync source                                                          #
-    # ------------------------------------------------------------------ #
-    log_info "Syncing project to VM..."
-    ssh_run "$ip" "mkdir -p ~/Projects/emojifont"
-    rsync_to_vm "$ip" "$PROJECT_DIR/" "~/Projects/emojifont/"
-
     local exit_code=0
-
-    # ------------------------------------------------------------------ #
-    # Python unit tests                                                    #
-    # ------------------------------------------------------------------ #
-    if [ "$run_unit" = true ]; then
-        log_info "Setting up Python environment..."
-        ssh_run "$ip" "
-            export PATH=\"\$HOME/.local/bin:\$PATH\"
-            cd ~/Projects/emojifont
-            uv sync 2>&1
-            uv pip install pytest 2>&1
-        " || { log_error "Python setup failed"; exit 1; }
-
-        log_info "Running Python unit tests..."
-        if ssh_run "$ip" "
-            export PATH=\"\$HOME/.local/bin:\$PATH\"
-            cd ~/Projects/emojifont
-            uv run python -m pytest tests/ -v 2>&1
-        "; then
-            log_info "Python unit tests passed."
-        else
-            log_error "Python unit tests failed."
-            exit_code=1
-        fi
-    fi
-
-    # ------------------------------------------------------------------ #
-    # CoreText rendering tests                                             #
-    # ------------------------------------------------------------------ #
-    if [ "$run_render" = true ]; then
-        local build_exit=0
-        if [ -n "$custom_font" ]; then
-            log_info "Uploading font: $custom_font"
-            rsync_to_vm "$ip" "$custom_font" "/tmp/TestMemeFont.ttf"
-        else
-            log_info "Building test font..."
-            build_test_font "$ip"
-            build_exit=$?
-        fi
-        font_built=true
-
-        if [ $build_exit -eq 2 ]; then
-            log_warn "Skipping render tests — base font or memes not synced"
-        elif [ $build_exit -ne 0 ]; then
-            log_error "Font build failed"
-            exit_code=1
-        else
-            # Parse codepoints into space-separated args
-            local cp_args=""
-            IFS=',' read -ra CPS <<< "$codepoints"
-            for cp in "${CPS[@]}"; do
-                cp_args="$cp_args 0x$cp"
-            done
-
-            log_info "Running CoreText render check..."
-            # Upload the render-check script
-            rsync_to_vm "$ip" "$PROJECT_DIR/vm/scripts/render-check.swift" "/tmp/render-check.swift"
-
-            if ssh_run "$ip" "swift /tmp/render-check.swift /tmp/TestMemeFont.ttf $cp_args 2>&1"; then
-                log_info "CoreText render check passed."
-            else
-                log_error "CoreText render check failed."
-                exit_code=1
-            fi
-        fi
-    fi
 
     # ------------------------------------------------------------------ #
     # MemeTerminal screenshot test                                         #
     # ------------------------------------------------------------------ #
-    if [ "$run_screenshot" = true ] && [ "$font_built" = false ]; then
-        if [ -n "$custom_font" ]; then
-            log_info "Uploading font: $custom_font"
-            rsync_to_vm "$ip" "$custom_font" "/tmp/TestMemeFont.ttf"
-        else
-            log_info "Building test font for screenshot..."
-            build_test_font "$ip" \
-                || { log_warn "Font build failed — skipping screenshot"; run_screenshot=false; }
-        fi
+    log_info "Uploading font..."
+    rsync_to_vm "$ip" "$font_path" "/tmp/TestMemeFont.ttf"
+
+    log_info "Uploading screenshot script..."
+    sshpass -p "$SSH_PASS" scp $SSH_OPTS \
+        "$PROJECT_DIR/vm/scripts/terminal-screenshot.sh" \
+        "${SSH_USER}@${ip}:/tmp/terminal-screenshot.sh"
+
+    # Parse codepoints into space-separated args
+    local cp_script_args=""
+    IFS=',' read -ra CPS <<< "$codepoints"
+    for cp in "${CPS[@]}"; do
+        cp_script_args="$cp_script_args $cp"
+    done
+
+    log_info "Running MemeTerminal screenshot test..."
+    if ssh_run "$ip" "chmod +x /tmp/terminal-screenshot.sh && /tmp/terminal-screenshot.sh /tmp/TestMemeFont.ttf /tmp/screenshots '$ps_name' $cp_script_args 2>&1"; then
+        log_info "Screenshot test passed."
+
+        # Copy screenshots back to host
+        local local_output="$PROJECT_DIR/vm/output/screenshots"
+        mkdir -p "$local_output"
+        rsync_from_vm "$ip" "/tmp/screenshots/" "$local_output/"
+        log_info "Screenshots saved to vm/output/screenshots/"
+    else
+        log_error "Screenshot test failed."
+        exit_code=1
     fi
 
-    if [ "$run_screenshot" = true ]; then
-        log_info "Running MemeTerminal screenshot test..."
-
-        # Upload the screenshot script
-        sshpass -p "$SSH_PASS" scp $SSH_OPTS \
-            "$PROJECT_DIR/vm/scripts/terminal-screenshot.sh" \
-            "${SSH_USER}@${ip}:/tmp/terminal-screenshot.sh"
-
-        # Parse codepoints for the script
-        local cp_script_args=""
-        IFS=',' read -ra CPS <<< "$codepoints"
-        for cp in "${CPS[@]}"; do
-            cp_script_args="$cp_script_args $cp"
-        done
-
-        if ssh_run "$ip" "chmod +x /tmp/terminal-screenshot.sh && /tmp/terminal-screenshot.sh /tmp/TestMemeFont.ttf /tmp/screenshots $cp_script_args 2>&1"; then
-            log_info "Screenshot test passed."
-
-            # Copy screenshots back to host
-            local local_output="$PROJECT_DIR/vm/output/screenshots"
-            mkdir -p "$local_output"
-            rsync_from_vm "$ip" "/tmp/screenshots/" "$local_output/"
-            log_info "Screenshots saved to vm/output/screenshots/"
-        else
-            log_error "Screenshot test failed."
-            exit_code=1
-        fi
+    if [ -z "$custom_font" ]; then
+        rm -rf "$scratch_dir"
     fi
 
     # ------------------------------------------------------------------ #

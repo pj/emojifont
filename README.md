@@ -111,8 +111,8 @@ uv sync                 # create venv + install deps
 uv run emojifont --help
 ```
 
-A `justfile` wraps the commands below (and the VM/test-app ones further down)
-— run `just --list` to see everything, e.g. `just test`, `just fetch-packs pepe`,
+A `justfile` wraps the commands below (and the VM test ones further down) —
+run `just --list` to see everything, e.g. `just test`, `just fetch-packs pepe`,
 `just dedupe-dry-run`, `just web`.
 
 Source fonts and meme images live in `font_build/` (gitignored — images may be
@@ -124,28 +124,14 @@ uv run emojifont font_build/MonacoNerdFontMono-Regular.ttf font_build/MemeFont.t
   --font-name "MemeFont"
 ```
 
-The test app loads `font_build/MemeFont.ttf` automatically.
-
-### Test app (macOS)
-
-`FontTestApp/` contains a SwiftUI app that renders the generated font at
-multiple sizes alongside normal text and system emoji, with alignment
-diagnostics and an embedded terminal (SwiftTerm) for end-to-end testing.
+End-to-end verification (real color-emoji rendering, not just the font's own
+data) happens in a macOS VM — see [vm/README.md](vm/README.md). It installs a
+[fork of iTerm2](https://github.com/pj/iTerm2) with SBIX support, points it at
+the generated font, and screenshots the result:
 
 ```bash
-# Build & run the app (requires full Xcode)
-swift run --package-path FontTestApp FontTestApp
-
-# Headless: capture snapshots + alignment report into snapshots/
-swift run --package-path FontTestApp FontTestApp --diagnose
-```
-
-If building from inside the Nix devshell, point the toolchain at Xcode:
-
-```bash
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
-SDKROOT=$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk \
-swift run --package-path FontTestApp FontTestApp
+just vm-test                                  # the 2-meme fixture from font_build/memes/
+just vm-test --font font_build/MemeFont.ttf   # any already-built font
 ```
 
 ### More docs

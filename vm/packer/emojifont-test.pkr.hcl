@@ -10,7 +10,7 @@ packer {
 variable "base_image" {
   type        = string
   default     = "ghcr.io/cirruslabs/macos-sequoia-xcode:latest"
-  description = "Base macOS image (needs Swift/CoreText for rendering tests)"
+  description = "Base macOS image (needs Xcode/Swift/CoreText to register the font before MemeTerminal can use it)"
 }
 
 variable "vm_name" {

@@ -12,15 +12,22 @@ set -euo pipefail
 #     (a dialog appears on first screencapture via SSH — click "Allow")
 #
 # Usage:
-#   terminal-screenshot.sh <font-path> <output-dir> [codepoints...]
+#   terminal-screenshot.sh <font-path> <output-dir> <font-ps-name> [codepoints...]
+#
+# <font-ps-name> is the font's PostScript name (name table ID 6) — the value
+# iTerm2's Dynamic Profile needs to select it by name. This script doesn't
+# derive it from the font file itself: that would need fontTools, and this
+# script intentionally has no Python dependency, so the caller (run-tests.sh)
+# reads it from the font on the host and passes it in.
 #
 # Example:
-#   terminal-screenshot.sh /tmp/TestMemeFont.ttf /tmp/screenshots F900 F901
+#   terminal-screenshot.sh /tmp/TestMemeFont.ttf /tmp/screenshots MemeFont F900 F901
 #
 
-FONT_PATH="${1:?Usage: terminal-screenshot.sh <font-path> <output-dir> [codepoints...]}"
-OUTPUT_DIR="${2:?Usage: terminal-screenshot.sh <font-path> <output-dir> [codepoints...]}"
-shift 2
+FONT_PATH="${1:?Usage: terminal-screenshot.sh <font-path> <output-dir> <font-ps-name> [codepoints...]}"
+OUTPUT_DIR="${2:?Usage: terminal-screenshot.sh <font-path> <output-dir> <font-ps-name> [codepoints...]}"
+PS_NAME="${3:?Usage: terminal-screenshot.sh <font-path> <output-dir> <font-ps-name> [codepoints...]}"
+shift 3
 # Note: ("${@:-F900 F901}") would collapse the default into a single element
 # "F900 F901" rather than two, so spell the fallback out.
 if [ $# -gt 0 ]; then
@@ -241,20 +248,6 @@ echo "  Adjacency script: $ADJACENCY_SCRIPT"
 # 4. Configure MemeTerminal profile                                            #
 # --------------------------------------------------------------------------- #
 echo "[4/7] Configuring MemeTerminal profile..."
-
-# Get the PostScript name from the font file
-PS_NAME=$(
-    cd ~/Projects/emojifont 2>/dev/null && \
-    PATH="$HOME/.local/bin:$PATH" uv run python3 -c "
-from fontTools.ttLib import TTFont
-f = TTFont('$FONT_PATH')
-for r in f['name'].names:
-    if r.nameID == 6:
-        print(r.toUnicode())
-        break
-f.close()
-" 2>/dev/null || echo "MemeFont"
-)
 
 FONT_SIZE=24
 DYNAMIC_DIR="$HOME/Library/Application Support/iTerm2/DynamicProfiles"
