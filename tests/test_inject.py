@@ -8,6 +8,8 @@ from PIL import Image
 from fontTools.ttLib import TTFont
 
 from emojifont.inject import (
+    CODEPOINT_BLOCK_END,
+    DEFAULT_START_CODEPOINT,
     cells_for_codepoint,
     ensure_glyph_exists,
     inject_sbix_memes,
@@ -124,6 +126,8 @@ class TestResizeImageToEmoji:
 class TestCellsForCodepoint:
     @pytest.mark.parametrize("cp", [0xF900, 0xF901, 0xFAFF])
     def test_cjk_compatibility_ideographs_are_wide(self, cp):
+        """No longer the default meme range, but the general East Asian Width
+        fallback must still size arbitrary explicit mappings correctly."""
         assert cells_for_codepoint(cp) == 2
 
     @pytest.mark.parametrize("cp", [0x1F600, 0x1F680, 0x1F525])
@@ -134,6 +138,25 @@ class TestCellsForCodepoint:
     @pytest.mark.parametrize("cp", [0xE000, 0xF8FF, 0x0041])
     def test_pua_and_ascii_are_narrow(self, cp):
         assert cells_for_codepoint(cp) == 1
+
+    def test_default_range_bounds(self):
+        assert (DEFAULT_START_CODEPOINT, CODEPOINT_BLOCK_END) == (0x100000, 0x1003FF)
+
+    @pytest.mark.parametrize("cp", [0x100000, 0x100001, 0x1003FF])
+    def test_meme_range_is_wide(self, cp):
+        """The default meme range (Plane 16 PUA) must be wide unconditionally
+        — its Unicode East Asian Width is 'Ambiguous', not 'Wide', so this
+        can't come from the unicodedata fallback; it's an explicit range
+        check in cells_for_codepoint that a paired terminal patch mirrors."""
+        assert cells_for_codepoint(cp) == 2
+
+    def test_just_past_meme_range_falls_back_to_east_asian_width(self):
+        """One past CODEPOINT_BLOCK_END must not still be treated as a meme
+        slot — it's plain Plane 16 PUA (Ambiguous), so narrow."""
+        assert cells_for_codepoint(CODEPOINT_BLOCK_END + 1) == 1
+
+    def test_just_before_meme_range_is_narrow(self):
+        assert cells_for_codepoint(DEFAULT_START_CODEPOINT - 1) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -233,6 +256,36 @@ class TestInjectSbixMemes:
         font.close()
 
     def test_glyph_added_to_glyph_order(self, minimal_font, test_image_path, tmp_path):
+        out = tmp_path / "out.ttf"
+        inject_sbix_memes(
+            str(minimal_font), str(out),
+            {0xF900: str(test_image_path)},
+        )
+        font = TTFont(str(out))
+        assert "uniF900" in font.getGlyphOrder()
+        font.close()
+
+    def test_supplementary_plane_glyph_name_uses_agl_convention(self, minimal_font, test_image_path, tmp_path):
+        """Adobe Glyph List naming: BMP code points use 'uni' + exactly 4 hex
+        digits; code points above the BMP (including the default meme range,
+        which lives in Plane 16) use 'u' + 4-6 hex digits with no 'ni'. Glyph
+        names aren't looked up by convention when this font renders — cmap
+        does the real mapping — but other tools that inspect the font expect
+        this, and getting it wrong here would be an easy thing to miss since
+        nothing in our own pipeline depends on it being right."""
+        out = tmp_path / "out.ttf"
+        inject_sbix_memes(
+            str(minimal_font), str(out),
+            {DEFAULT_START_CODEPOINT: str(test_image_path)},
+        )
+        font = TTFont(str(out))
+        assert "u100000" in font.getGlyphOrder()
+        assert "uni100000" not in font.getGlyphOrder()
+        cmap = font.getBestCmap()
+        assert cmap[DEFAULT_START_CODEPOINT] == "u100000"
+        font.close()
+
+    def test_bmp_glyph_name_still_uses_uni_convention(self, minimal_font, test_image_path, tmp_path):
         out = tmp_path / "out.ttf"
         inject_sbix_memes(
             str(minimal_font), str(out),

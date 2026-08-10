@@ -12,6 +12,7 @@ from fontTools.ttLib.tables._s_b_i_x import table__s_b_i_x
 from fontTools.ttLib.tables.sbixStrike import Strike, Glyph as SbixGlyph
 from fontTools.ttLib.tables._g_l_y_f import Glyph as TTGlyph, GlyphCoordinates
 from fontTools.ttLib.tables import ttProgram
+from fontTools.ttLib.tables._c_m_a_p import CmapSubtable
 from PIL import Image
 
 def rename_font(font, new_family_name):
@@ -104,18 +105,81 @@ def resize_image_to_emoji(image_data, content_width, content_height, canvas_widt
     return output.getvalue(), canvas_width, canvas_height
 
 
+# Meme glyphs live in the Supplementary Private Use Area, Plane 16
+# (U+100000-U+10FFFD) — code points the Unicode Standard guarantees will never
+# receive real character assignments, unlike the CJK Compatibility Ideographs
+# block this project used previously (real characters used for legacy CJK
+# round-trip encoding; using them for memes meant any font/terminal that ever
+# encountered genuine CJK compatibility text would silently show a meme
+# instead). Plane 16 also avoids the Nerd Font icon sets that densely
+# populate the BMP Private Use Area (U+E000-U+F8FF) in typical monospace
+# fonts, and requires full 4-byte UTF-8 encoding, so almost nothing else on
+# a real system ever touches it.
+#
+# The tradeoff: Plane 16 PUA's default Unicode East Asian Width is
+# "Ambiguous", not "Wide" — unlike the old CJK block, terminals won't render
+# it at 2 cells for free. See iTermIsDoubleWidthCharacter() in the
+# MemeTerminal fork's iTermCharacterWidth.c for the paired terminal-side
+# patch that makes this range unconditionally double-width.
+DEFAULT_START_CODEPOINT = 0x100000
+CODEPOINT_BLOCK_SIZE = 1024
+CODEPOINT_BLOCK_END = DEFAULT_START_CODEPOINT + CODEPOINT_BLOCK_SIZE - 1  # 0x1003FF
+
+
 def cells_for_codepoint(unicode_point):
     """
-    Number of terminal cells a code point occupies, per Unicode East Asian Width.
+    Number of terminal cells a code point occupies.
 
-    Wide (W) and Fullwidth (F) code points get two cells — this includes the CJK
-    Compatibility Ideographs block (U+F900-U+FAFF) and standard emoji. Everything
-    else, including the Private Use Area (U+E000-U+F8FF, Ambiguous), gets one.
+    Meme glyphs (the DEFAULT_START_CODEPOINT..CODEPOINT_BLOCK_END range) always
+    get two cells — that's the whole point of injecting them — via an explicit
+    range check rather than Unicode East Asian Width, since Private Use Area
+    code points report "Ambiguous" width regardless of what a font puts there.
 
-    Matching this matters for sizing: a two-cell glyph can fill the full em square
-    the way system emoji do, while a one-cell glyph is limited to the cell width.
+    Everything else falls back to standard Unicode East Asian Width: Wide (W)
+    and Fullwidth (F) code points (CJK ideographs, standard emoji, etc.) get
+    two cells; everything else gets one. This path matters if a mapping is
+    given a code point outside the default meme range (e.g. via --mappings
+    with an explicit U+XXXX), so it still sizes sensibly.
+
+    Matching cell count to what the terminal will actually allocate is what
+    lets a two-cell glyph fill the full em square the way system emoji do,
+    instead of being squeezed into a single narrow cell.
     """
+    if DEFAULT_START_CODEPOINT <= unicode_point <= CODEPOINT_BLOCK_END:
+        return 2
     return 2 if unicodedata.east_asian_width(chr(unicode_point)) in ('W', 'F') else 1
+
+
+# cmap format 4 (and formats 0/2/6) store character codes as 16-bit values —
+# they physically cannot represent code points above U+FFFF. fontTools raises
+# an OverflowError at save() time if you try to put one in, which is a
+# confusing place to discover the problem. Format 12 stores 32-bit codes and
+# is the one that can hold our default Plane 16 meme range.
+BMP_ONLY_CMAP_FORMATS = (0, 2, 4, 6)
+
+
+def ensure_supplementary_cmap_subtable(font):
+    """
+    Find (or create) a cmap subtable that can hold code points above U+FFFF.
+
+    Most real fonts already have one — Apple platforms and Windows both
+    expect a format 12 subtable for any font claiming supplementary-plane
+    coverage. A minimal/synthetic font may not, in which case one is added:
+    platform 3 (Windows), encoding 10 (Unicode UCS-4), the conventional pair
+    for format 12, matching what real fonts of this kind use.
+    """
+    if 'cmap' not in font:
+        raise ValueError("Font has no 'cmap' table")
+    for subtable in font['cmap'].tables:
+        if subtable.format not in BMP_ONLY_CMAP_FORMATS and subtable.isUnicode():
+            return subtable
+    subtable = CmapSubtable.getSubtableClass(12)(12)
+    subtable.platformID = 3
+    subtable.platEncID = 10
+    subtable.language = 0
+    subtable.cmap = {}
+    font['cmap'].tables.append(subtable)
+    return subtable
 
 
 def ensure_glyph_exists(font, glyph_name, advance_width, units_per_em):
@@ -262,8 +326,18 @@ def inject_sbix_memes(font_path, output_path, mappings, ppem=160, ppi=72, resize
     # Add meme bitmaps: create a new glyph per code point so we don't replace shared glyphs (e.g. Nerd Font icons at E000)
     for unicode_point, meme_path in mappings.items():
         try:
-            # Use a dedicated glyph for this code point (e.g. uniF900) so only U+F900 shows our bitmap
-            glyph_name = f"uni{unicode_point:04X}"
+            # Use a dedicated glyph for this code point so only that exact code
+            # point shows our bitmap. Adobe Glyph List naming convention: BMP
+            # code points (<=U+FFFF) use "uni" + exactly 4 hex digits (e.g.
+            # uniF900); code points above the BMP — including our default
+            # Plane 16 meme range — use "u" + 4-6 hex digits with no "ni"
+            # (e.g. u100000). Glyph names are internal to this font and never
+            # looked up by convention when rendering, but other tools that
+            # inspect the font do expect this convention.
+            if unicode_point <= 0xFFFF:
+                glyph_name = f"uni{unicode_point:04X}"
+            else:
+                glyph_name = f"u{unicode_point:04X}"
 
             # Terminals lay out wide code points across two cells, so the glyph's
             # advance must span both. Otherwise the bitmap is confined to half the
@@ -348,13 +422,23 @@ def inject_sbix_memes(font_path, output_path, mappings, ppem=160, ppi=72, resize
             if 'hmtx' in font:
                 font['hmtx'].metrics[glyph_name] = (advance, 0)
             
-            # Ensure this code point maps to our glyph in all Unicode cmap subtables
-            # (so the requested U+F900 etc. always show our bitmap regardless of which subtable the OS uses)
+            # Ensure this code point maps to our glyph in every Unicode cmap subtable
+            # that can represent it (so the requested code point always shows our
+            # bitmap regardless of which subtable the OS consults). Code points
+            # above the BMP — including the default meme range — can only go in
+            # subtables that support 32-bit codes (format 12); writing one into a
+            # BMP-only subtable (format 4 etc.) doesn't raise here, it corrupts the
+            # table silently and only fails later, confusingly, when the font is
+            # saved.
             if 'cmap' in font:
-                for subtable in font['cmap'].tables:
-                    if getattr(subtable, 'isUnicode', lambda: False)():
-                        if hasattr(subtable, 'cmap') and subtable.cmap is not None:
-                            subtable.cmap[unicode_point] = glyph_name
+                if unicode_point > 0xFFFF:
+                    target = ensure_supplementary_cmap_subtable(font)
+                    target.cmap[unicode_point] = glyph_name
+                else:
+                    for subtable in font['cmap'].tables:
+                        if getattr(subtable, 'isUnicode', lambda: False)():
+                            if hasattr(subtable, 'cmap') and subtable.cmap is not None:
+                                subtable.cmap[unicode_point] = glyph_name
             
             # Also add scaled versions to other strikes
             for strike_ppem, other_strike in strikes.items():
@@ -447,14 +531,18 @@ def main():
     
     parser = argparse.ArgumentParser(
         description='Inject meme images into a font using SBIX format',
-        epilog='Example: %(prog)s input.ttf output.ttf --mappings "U+F900:pepe.png,U+F901:drake.jpg"\n\n'
-               'CJK Compatibility Ideographs: U+F900 to U+FAFF. Unicode East Asian Width = Wide (2 cells).\n'
-               'U+F8FF and below (PUA) = 1 cell; U+F900+ = 2 cells. Terminals (e.g. iTerm2) follow this.'
+        epilog='Example: %(prog)s input.ttf output.ttf --mappings "U+100000:pepe.png,U+100001:drake.jpg"\n\n'
+               'Default meme range: U+100000-U+1003FF (Supplementary PUA, Plane 16; 1024 code\n'
+               'points), rendered at 2 cells wide. This range has no meaning of its own in\n'
+               'Unicode and is unclaimed by fonts/tools, but terminals do not render it wide by\n'
+               'default — pair with a terminal patched to treat it as double-width (see\n'
+               'iTermIsDoubleWidthCharacter in the MemeTerminal fork for iTerm2). Explicit\n'
+               'code points outside this range fall back to standard Unicode East Asian Width.'
     )
     parser.add_argument('font_file', help='Input font file path')
     parser.add_argument('output_file', help='Output font file path')
     parser.add_argument('--mappings', required=True,
-                        help='Comma-separated mappings of Unicode to meme images (e.g., "U+F900:pepe.png,U+F901:drake.jpg")')
+                        help='Comma-separated mappings of Unicode to meme images (e.g., "U+100000:pepe.png,U+100001:drake.jpg")')
     parser.add_argument('--ppem', type=int, default=160,
                         help='Pixels per EM for the SBIX strike (default: 160)')
     parser.add_argument('--ppi', type=int, default=72,

@@ -21,19 +21,19 @@ set -euo pipefail
 # reads it from the font on the host and passes it in.
 #
 # Example:
-#   terminal-screenshot.sh /tmp/TestMemeFont.ttf /tmp/screenshots MemeFont F900 F901
+#   terminal-screenshot.sh /tmp/TestMemeFont.ttf /tmp/screenshots MemeFont 100000 100001
 #
 
 FONT_PATH="${1:?Usage: terminal-screenshot.sh <font-path> <output-dir> <font-ps-name> [codepoints...]}"
 OUTPUT_DIR="${2:?Usage: terminal-screenshot.sh <font-path> <output-dir> <font-ps-name> [codepoints...]}"
 PS_NAME="${3:?Usage: terminal-screenshot.sh <font-path> <output-dir> <font-ps-name> [codepoints...]}"
 shift 3
-# Note: ("${@:-F900 F901}") would collapse the default into a single element
-# "F900 F901" rather than two, so spell the fallback out.
+# Note: ("${@:-100000 100001}") would collapse the default into a single
+# element "100000 100001" rather than two, so spell the fallback out.
 if [ $# -gt 0 ]; then
     CODEPOINTS=("$@")
 else
-    CODEPOINTS=(F900 F901)
+    CODEPOINTS=(100000 100001)
 fi
 
 RELEASE_URL="https://github.com/pj/iTerm2/releases/download/v0.0.1/MemeTerminal.zip"

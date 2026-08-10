@@ -6,16 +6,23 @@ format. Take any font, add your favourite images at unused code points, and use
 them in your terminal, editor, or any app — just like real emoji.
 
 ```
-echo "deploy succeeded \uf900"     # prints your image in the terminal
+echo "deploy succeeded \U00100000"     # prints your image in the terminal
 ```
 
 ## How it works
 
 - Images are resized and embedded into the font's `sbix` table at multiple
   sizes (strikes), the same mechanism Apple Color Emoji uses on macOS/iOS.
-- Code points in the CJK Compatibility Ideographs block (U+F900–U+FAFF) are
-  used by default. These have Unicode East Asian Width = Wide, so terminals
-  allocate 2 cells — giving your images room to render at full emoji size.
+- Code points from the Supplementary Private Use Area, Plane 16
+  (U+100000–U+1003FF, 1024 code points) are used by default — a block the
+  Unicode Standard guarantees will never receive real character assignments,
+  unlike the CJK Compatibility Ideographs this project used to use, and
+  untouched by the Nerd Font icon sets that densely populate the more common
+  BMP Private Use Area. Its default width is "Ambiguous," not "Wide," so
+  terminals won't allocate 2 cells for it on their own — a paired patch in
+  [MemeTerminal](https://github.com/pj/iTerm2) (a fork of iTerm2) makes this
+  specific range unconditionally double-width. Other terminals will show
+  these code points at 1 cell unless similarly patched.
 - Images are vertically centered between the ascender and descender and scaled
   to match the size of system emoji.
 
@@ -38,7 +45,7 @@ uv tool install .
 
 ```bash
 emojifont input.ttf output.ttf \
-  --mappings "U+F900:pepe.jpg,U+F901:shark.png" \
+  --mappings "U+100000:pepe.jpg,U+100001:shark.png" \
   --font-name "MemeFont"
 ```
 
@@ -66,7 +73,7 @@ emojifont-fetch get pepehappy pepeok --out memes/
 ```
 
 `get` downloads only what you name and prints a ready-to-paste `--mappings`
-string with code points assigned from U+F900 up.
+string with code points assigned from U+100000 up.
 
 To grab everything and sort through it in a file browser instead:
 
@@ -86,7 +93,7 @@ links rather than aborting. Copy what you like into your memes directory.
 | `--source` | `emoji.gg` (default) or `slackmojis` |
 | `--html` | Write an HTML contact sheet of thumbnails (`list` only) |
 | `--out` | Download directory (`get` only, default `memes`) |
-| `--start-codepoint` | First code point to assign (default `F900`) |
+| `--start-codepoint` | First code point to assign (default `100000`) |
 | `--include-animated` | Include GIFs (see below) |
 
 Animated GIFs are skipped by default: SBIX stores one still per glyph, so an
@@ -120,7 +127,7 @@ copyrighted). Build the test font into it:
 
 ```bash
 uv run emojifont font_build/MonacoNerdFontMono-Regular.ttf font_build/MemeFont.ttf \
-  --mappings "U+F900:font_build/memes/pepe.jpg,U+F901:font_build/memes/mofusand_shark.jpg" \
+  --mappings "U+100000:font_build/memes/pepe.jpg,U+100001:font_build/memes/mofusand_shark.jpg" \
   --font-name "MemeFont"
 ```
 
@@ -138,7 +145,6 @@ just vm-test --font font_build/MemeFont.ttf   # any already-built font
 
 - [FONT_INJECTION.md](FONT_INJECTION.md) — technical details of SBIX injection
 - [USAGE.md](USAGE.md) — using the font in terminals, shells, and editors
-- [README_FONT_TESTING.md](README_FONT_TESTING.md) — quick font testing with `test_font.py`
 
 ## License
 

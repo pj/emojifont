@@ -225,7 +225,7 @@ class TestGenerate:
     def test_generates_real_font_with_selection_order_as_codepoint_order(self, server, tmp_path):
         """The core promise of the whole feature: what you selected, in the
         order you selected it, is what ends up in the font at consecutive
-        code points starting from F900."""
+        code points starting from the default meme range."""
         self._select(server, "shark", "pepe")
         out = tmp_path / "generated.ttf"
         data = server.post("/api/generate", {
@@ -233,15 +233,15 @@ class TestGenerate:
         })
         assert data["count"] == 2
         assert data["mapping"] == [
-            {"codepoint": "U+F900", "name": "shark"},
-            {"codepoint": "U+F901", "name": "pepe"},
+            {"codepoint": "U+100000", "name": "shark"},
+            {"codepoint": "U+100001", "name": "pepe"},
         ]
         assert out.exists()
 
         font = TTFont(str(out))
         assert "sbix" in font
         cmap = font.getBestCmap()
-        assert 0xF900 in cmap and 0xF901 in cmap
+        assert 0x100000 in cmap and 0x100001 in cmap
         font.close()
 
     def test_custom_start_codepoint_honoured(self, server, tmp_path):

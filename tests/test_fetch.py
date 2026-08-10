@@ -172,21 +172,22 @@ class TestPacks:
 # ---------------------------------------------------------------------------
 
 class TestAssignCodepoints:
-    def test_consecutive_from_f900(self):
-        assert assign_codepoints(3) == [0xF900, 0xF901, 0xF902]
+    def test_consecutive_from_default_start(self):
+        assert assign_codepoints(3) == [0x100000, 0x100001, 0x100002]
 
     def test_custom_start(self):
-        assert assign_codepoints(2, 0xF9F0) == [0xF9F0, 0xF9F1]
+        assert assign_codepoints(2, 0x100010) == [0x100010, 0x100011]
 
     def test_fills_block_exactly(self):
-        cps = assign_codepoints(512, DEFAULT_START_CODEPOINT)
+        cps = assign_codepoints(1024, DEFAULT_START_CODEPOINT)
         assert cps[-1] == CODEPOINT_BLOCK_END
 
     def test_overflowing_block_raises(self):
-        """Past U+FAFF the code points stop being East Asian Wide, so memes
+        """Past the meme block, code points stop being unconditionally wide
+        (the paired terminal patch only covers the reserved range), so memes
         would silently drop to one cell and render half size."""
-        with pytest.raises(ValueError, match="past U\\+FAFF"):
-            assign_codepoints(513, DEFAULT_START_CODEPOINT)
+        with pytest.raises(ValueError, match="past U\\+1003FF"):
+            assign_codepoints(1025, DEFAULT_START_CODEPOINT)
 
     def test_empty_selection(self):
         assert assign_codepoints(0) == []

@@ -126,7 +126,7 @@ usage() {
     echo ""
     echo "Options:"
     echo "  --keep              Keep VM running after the test (for debugging)"
-    echo "  --codepoints CP    Comma-separated hex codepoints (default: F900,F901)"
+    echo "  --codepoints CP    Comma-separated hex codepoints (default: 100000,100001)"
     echo "  --font PATH        Use this already-built font instead of building one from"
     echo "                     font_build/memes/. If --codepoints isn't also given, every"
     echo "                     meme code point actually present in the font is used."
@@ -145,7 +145,7 @@ build_local_test_font() {
         return 2
     fi
 
-    local mappings="" cp=63744  # 0xF900
+    local mappings="" cp=1048576  # 0x100000
     for img in "$memes_dir"/*; do
         local hex
         hex=$(printf '%04X' "$cp")
@@ -158,17 +158,17 @@ build_local_test_font() {
         --mappings "$mappings" --font-name "TestMemeFont"
 }
 
-# Read the U+F900-U+FAFF code points actually present in a font's cmap, as a
-# comma-separated hex list — so --font can be pointed at any generated font
-# (e.g. one built via the web UI) without having to know or retype its
-# mappings by hand.
+# Read the meme code points (U+100000-U+1003FF, Supplementary PUA Plane 16)
+# actually present in a font's cmap, as a comma-separated hex list — so
+# --font can be pointed at any generated font (e.g. one built via the web
+# UI) without having to know or retype its mappings by hand.
 codepoints_from_font() {
     local font_path=$1
     "$PROJECT_DIR/.venv/bin/python" -c "
 from fontTools.ttLib import TTFont
 f = TTFont('$font_path')
 cmap = f.getBestCmap()
-cps = sorted(cp for cp in cmap if 0xF900 <= cp <= 0xFAFF)
+cps = sorted(cp for cp in cmap if 0x100000 <= cp <= 0x1003FF)
 print(','.join(f'{cp:04X}' for cp in cps))
 f.close()
 "
@@ -241,7 +241,7 @@ run_tests() {
     if [ "$codepoints_explicit" = false ]; then
         codepoints=$(codepoints_from_font "$font_path")
         if [ -z "$codepoints" ]; then
-            log_error "No U+F900-U+FAFF code points found in $font_path"
+            log_error "No U+100000-U+1003FF code points found in $font_path"
             exit 1
         fi
     fi

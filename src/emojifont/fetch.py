@@ -31,6 +31,8 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+from emojifont.inject import CODEPOINT_BLOCK_END, DEFAULT_START_CODEPOINT
+
 USER_AGENT = "emojifont/0.1 (+https://github.com/pj/emojifont)"
 CACHE_TTL_SECONDS = 24 * 60 * 60
 
@@ -51,12 +53,6 @@ CONTENT_TYPE_EXT = {
     "image/jpeg": ".jpg",
     "image/avif": ".avif",
 }
-
-# CJK Compatibility Ideographs. Terminals treat these as East Asian Wide, so
-# they get two cells — the room a meme needs to render at full emoji size.
-# See cells_for_codepoint() in inject.py.
-DEFAULT_START_CODEPOINT = 0xF900
-CODEPOINT_BLOCK_END = 0xFAFF
 
 STATIC_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
 # Static plus animated — the full set of "this is an image file" for browsing
@@ -381,14 +377,14 @@ def assign_codepoints(count, start=DEFAULT_START_CODEPOINT):
     if end > CODEPOINT_BLOCK_END:
         raise ValueError(
             f"{count} memes starting at U+{start:04X} runs past U+{CODEPOINT_BLOCK_END:04X}, "
-            f"the end of the CJK Compatibility Ideographs block. "
+            f"the end of the meme code point block (Supplementary PUA, Plane 16). "
             f"Room for {CODEPOINT_BLOCK_END - start + 1} here."
         )
     return list(range(start, start + count))
 
 
 def mappings_string(pairs):
-    """Build the --mappings argument: 'U+F900:a.png,U+F901:b.png'."""
+    """Build the --mappings argument: 'U+100000:a.png,U+100001:b.png'."""
     return ",".join(f"U+{cp:04X}:{path}" for cp, path in pairs)
 
 
@@ -988,7 +984,7 @@ use, check before redistributing.""",
     common(p_get)
     p_get.add_argument("--out", default="memes", help="output directory (default: memes)")
     p_get.add_argument("--start-codepoint", type=_hex_codepoint, default=DEFAULT_START_CODEPOINT,
-                       help="first code point to assign (default: F900)")
+                       help="first code point to assign (default: 100000)")
     p_get.set_defaults(func=cmd_get)
 
     p_dedupe = sub.add_parser(

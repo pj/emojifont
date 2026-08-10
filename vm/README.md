@@ -50,7 +50,7 @@ This creates a local VM named `emojifont-test` with:
 ./vm/run-tests.sh --font font_build/MemeFont.ttf
 
 # Custom codepoints
-./vm/run-tests.sh --codepoints "F900,F901,F902"
+./vm/run-tests.sh --codepoints "100000,100001,100002"
 
 # Keep the VM alive after the test for debugging
 ./vm/run-tests.sh --keep
@@ -61,7 +61,7 @@ The `justfile` at the repo root wraps these: `just vm-test`, `just vm-test-keep`
 `run-tests.sh` sequence:
 1. Obtains the font locally on the host — builds one from `font_build/memes/`
    via `emojifont`, or uses the file given via `--font`
-2. Reads the font's PostScript name and its U+F900-U+FAFF code points
+2. Reads the font's PostScript name and its U+100000-U+1003FF code points
    (needed to configure the terminal profile and the display script)
 3. Boots the VM with a GUI session (needed to launch MemeTerminal and take a
    screenshot — this can't run headlessly)
