@@ -35,6 +35,24 @@ inject base out mappings name="MemeFont":
 font *args:
     uv run emojifont {{ args }}
 
+# Build MemeFont.ttf from dotfiles/nix/memes/, assigning code points
+# deterministically: sort meme names (stem, case-sensitive) and assign
+# U+100000, U+100001, ... in order. commandline_thing's Meme operation
+# computes the same index over the same directory, so there's no separate
+# manifest to keep in sync — just rebuild this whenever memes/ changes.
+# Installs straight into dotfiles/nix/MemeFont.ttf, which flake.nix already
+# packages as a system font.
+build-dotfiles-font memes_dir="~/dotfiles/nix/memes" out="~/dotfiles/nix/MemeFont.ttf":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    memes_dir=$(eval echo {{memes_dir}})
+    out=$(eval echo {{out}})
+    mappings=$(uv run python3 scripts/meme_font_mappings.py "$memes_dir")
+    count=$(echo "$mappings" | tr ',' '\n' | wc -l | tr -d ' ')
+    echo "Injecting $count memes from $memes_dir into $out"
+    uv run emojifont font_build/MonacoNerdFontMono-Regular.ttf "$out" \
+        --mappings "$mappings" --font-name "MemeFont"
+
 # Build the demo font from font_build/memes/ (mirrors the README example)
 build-test-font:
     uv run emojifont font_build/MonacoNerdFontMono-Regular.ttf font_build/MemeFont.ttf \
