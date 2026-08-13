@@ -526,9 +526,72 @@ def parse_mappings(mappings_str):
     
     return mappings
 
+def build_meme_mappings_from_dir(memes_dir):
+    """
+    Build a {code point: image path} mapping for every image in memes_dir:
+    one glyph per distinct filename stem (extension stripped), sorted
+    (case-sensitive) and assigned sequential code points starting at
+    DEFAULT_START_CODEPOINT.
+
+    This ordering is the single source of truth for which meme gets which
+    code point — no separate manifest file. Anything that needs to look up a
+    specific meme's code point without rebuilding the font (e.g.
+    commandline_thing's MemeCodepoint) replicates this exact rule: sorted(),
+    case-sensitive, over extension-stripped stems in this same directory. The
+    two only stay in sync if the font is rebuilt whenever the directory's
+    contents change.
+    """
+    memes_dir = Path(memes_dir)
+    by_stem = {}
+    for entry in sorted(memes_dir.iterdir()):
+        if not entry.is_file():
+            continue
+        by_stem.setdefault(entry.stem, entry)
+
+    return {
+        DEFAULT_START_CODEPOINT + i: str(by_stem[stem])
+        for i, stem in enumerate(sorted(by_stem))
+    }
+
+
+def build_meme_font_main():
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description='Build a meme font: inject every image in a directory into a base '
+                    'font, one glyph per file (extension-stripped stem), assigning '
+                    'Supplementary PUA (Plane 16) code points in sorted order starting '
+                    'at U+100000 — see build_meme_mappings_from_dir.'
+    )
+    parser.add_argument('base_font', help='Input font file path')
+    parser.add_argument('memes_dir', help='Directory of meme images')
+    parser.add_argument('output_file', help='Output font file path')
+    parser.add_argument('--font-name', type=str, default='MemeFont',
+                        help='New font family name (default: MemeFont)')
+    parser.add_argument('--ppem', type=int, default=160,
+                        help='Pixels per EM for the SBIX strike (default: 160)')
+    parser.add_argument('--ppi', type=int, default=72,
+                        help='Pixels per inch resolution (default: 72)')
+
+    args = parser.parse_args()
+
+    mappings = build_meme_mappings_from_dir(args.memes_dir)
+    if not mappings:
+        print(f"Error: no images found in {args.memes_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Injecting {len(mappings)} meme(s) from {args.memes_dir} into font...")
+    try:
+        inject_sbix_memes(args.base_font, args.output_file, mappings, args.ppem, args.ppi,
+                          resize=True, font_name=args.font_name)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
 def main():
     import argparse
-    
+
     parser = argparse.ArgumentParser(
         description='Inject meme images into a font using SBIX format',
         epilog='Example: %(prog)s input.ttf output.ttf --mappings "U+100000:pepe.png,U+100001:drake.jpg"\n\n'

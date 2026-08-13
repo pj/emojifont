@@ -35,23 +35,18 @@ inject base out mappings name="MemeFont":
 font *args:
     uv run emojifont {{ args }}
 
-# Build MemeFont.ttf from dotfiles/nix/memes/, assigning code points
-# deterministically: sort meme names (stem, case-sensitive) and assign
-# U+100000, U+100001, ... in order. commandline_thing's Meme operation
-# computes the same index over the same directory, so there's no separate
-# manifest to keep in sync — just rebuild this whenever memes/ changes.
-# Installs straight into dotfiles/nix/MemeFont.ttf, which flake.nix already
-# packages as a system font.
-build-dotfiles-font memes_dir="~/dotfiles/nix/memes" out="~/dotfiles/nix/MemeFont.ttf":
+# Local preview build of MemeFont from dotfiles/nix/memes/ — same base font
+# and code-point assignment (sorted stem -> U+100000 + index) as the real
+# build, which now happens as a Nix derivation in dotfiles/nix/flake.nix
+# (see fonts.packages) rather than a committed file. Use this for a quick
+# look at a font change without a full nix build; out defaults to font_build/
+# so it never collides with anything nix or git track.
+preview-dotfiles-font memes_dir="~/dotfiles/nix/memes" out="font_build/MemeFont-preview.ttf":
     #!/usr/bin/env bash
     set -euo pipefail
     memes_dir=$(eval echo {{memes_dir}})
     out=$(eval echo {{out}})
-    mappings=$(uv run python3 scripts/meme_font_mappings.py "$memes_dir")
-    count=$(echo "$mappings" | tr ',' '\n' | wc -l | tr -d ' ')
-    echo "Injecting $count memes from $memes_dir into $out"
-    uv run emojifont font_build/MonacoNerdFontMono-Regular.ttf "$out" \
-        --mappings "$mappings" --font-name "MemeFont"
+    uv run emojifont-build-meme-font ~/dotfiles/nix/MonacoNerdFontCompleteMono.ttf "$memes_dir" "$out" --font-name MemeFont
 
 # Build the demo font from font_build/memes/ (mirrors the README example)
 build-test-font:

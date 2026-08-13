@@ -24,6 +24,7 @@ dependencies = [
 
 [project.scripts]
 emojifont = "emojifont.inject:main"
+emojifont-build-meme-font = "emojifont.inject:build_meme_font_main"
 emojifont-fetch = "emojifont.fetch:main"
 emojifont-web = "emojifont.webui.server:main"
 
