@@ -285,6 +285,29 @@ class TestInjectSbixMemes:
         assert cmap[DEFAULT_START_CODEPOINT] == "u100000"
         font.close()
 
+    def test_supplementary_plane_injection_preserves_existing_bmp_cmap(self, minimal_font, test_image_path, tmp_path):
+        """Regression test: injecting a supplementary-plane (>U+FFFF) code
+        point into a font with no existing format 12 cmap subtable used to
+        create a NEW, essentially empty one holding only the injected entry.
+        getBestCmap() (and real text-rendering engines, which follow the same
+        "prefer format 12 as the full-repertoire table" convention) then
+        picked that near-empty table over the font's original, far more
+        complete format 4 BMP subtable — silently breaking every other
+        character in the font, e.g. a Nerd Font's icon glyphs, the moment a
+        single meme got injected. The new format 12 subtable must be seeded
+        with the existing BMP mappings, not just the newly injected ones."""
+        out = tmp_path / "out.ttf"
+        inject_sbix_memes(
+            str(minimal_font), str(out),
+            {DEFAULT_START_CODEPOINT: str(test_image_path)},
+        )
+        font = TTFont(str(out))
+        cmap = font.getBestCmap()
+        assert cmap[0x41] == "A", "pre-existing BMP glyph 'A' must survive injection"
+        assert cmap[0x20] == "space", "pre-existing BMP glyph 'space' must survive injection"
+        assert cmap[DEFAULT_START_CODEPOINT] == "u100000"
+        font.close()
+
     def test_bmp_glyph_name_still_uses_uni_convention(self, minimal_font, test_image_path, tmp_path):
         out = tmp_path / "out.ttf"
         inject_sbix_memes(

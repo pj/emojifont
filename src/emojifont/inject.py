@@ -173,11 +173,28 @@ def ensure_supplementary_cmap_subtable(font):
     for subtable in font['cmap'].tables:
         if subtable.format not in BMP_ONLY_CMAP_FORMATS and subtable.isUnicode():
             return subtable
+
+    # A format 12 subtable is conventionally treated as a font's
+    # authoritative "full repertoire" Unicode cmap — fontTools' own
+    # getBestCmap() (and most real text-rendering engines) prefer it over a
+    # format 4/6 BMP-only subtable whenever one is present, regardless of
+    # which subtable actually maps more code points. A freshly created one
+    # must therefore start as a full copy of the existing BMP mappings, not
+    # just the new supplementary-plane entries added by the caller, or every
+    # character outside the newly injected range effectively disappears for
+    # any renderer that follows the same preference (this was a real bug:
+    # injecting memes silently broke every other glyph in the font,
+    # including the base font's own Nerd Font icons).
+    merged = {}
+    for subtable in font['cmap'].tables:
+        if subtable.isUnicode() and getattr(subtable, 'cmap', None):
+            merged.update(subtable.cmap)
+
     subtable = CmapSubtable.getSubtableClass(12)(12)
     subtable.platformID = 3
     subtable.platEncID = 10
     subtable.language = 0
-    subtable.cmap = {}
+    subtable.cmap = merged
     font['cmap'].tables.append(subtable)
     return subtable
 
